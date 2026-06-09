@@ -1,0 +1,48 @@
+@import 'tailwindcss';
+
+@source '../../vendor/laravel/framework/src/Illuminate/Pagination/resources/views/*.blade.php';
+@source '../../storage/framework/views/*.php';
+@source '../views';
+
+@theme {
+    --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
+        'Segoe UI Symbol', 'Noto Color Emoji';
+
+    /* Brand palette — indigo-leaning, calm & trustworthy for a checkout flow */
+    --color-brand-50: #eef2ff;
+    --color-brand-100: #e0e7ff;
+    --color-brand-200: #c7d2fe;
+    --color-brand-300: #a5b4fc;
+    --color-brand-400: #818cf8;
+    --color-brand-500: #6366f1;
+    --color-brand-600: #4f46e5;
+    --color-brand-700: #4338ca;
+    --color-brand-800: #3730a3;
+    --color-brand-900: #312e81;
+
+    /* App background / surface */
+    --color-ink: #1e2233;
+}
+
+/* ---------------------------------------------------------------------------
+   Base — neutral canvas, comfortable rhythm
+--------------------------------------------------------------------------- */
+@layer base {
+    body {
+        @apply bg-slate-50 text-slate-800 antialiased;
+    }
+
+    a {
+        @apply transition-colors;
+    }
+}
+
+/* ---------------------------------------------------------------------------
+   Small reusable bits that are awkward as long utility strings.
+   Components themselves live in Blade; these are shared primitives.
+--------------------------------------------------------------------------- */
+@layer components {
+    .focus-ring {
+        @apply focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-500 focus-visible:ring-offset-2;
+    }
+}

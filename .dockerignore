@@ -1,0 +1,15 @@
+# Keep the build context small and avoid baking host-only files into the image.
+.git
+node_modules
+vendor
+public/build
+e2e/node_modules
+e2e/playwright-report
+e2e/test-results
+storage/logs/*
+database/database.sqlite
+
+# Never bake host env into the image — E2E env comes from compose env_file.
+.env
+.env.*
+!.env.e2e.example

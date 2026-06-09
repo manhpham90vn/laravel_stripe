@@ -1,0 +1,65 @@
+# E2E stack: Laravel app + real Stripe CLI webhook forwarding + Playwright.
+#
+#   cp .env.e2e.example .env.e2e   # fill in real Stripe TEST keys
+#   docker compose -f docker-compose.e2e.yml up --build --abort-on-container-exit \
+#       --exit-code-from playwright
+#
+# Flow: playwright drives the app -> Stripe Checkout (test mode) -> Stripe sends
+# webhooks -> stripe-cli forwards them to app:8000/webhooks/stripe -> queue:work.
+name: payment-e2e
+
+volumes:
+  shared: {}
+
+services:
+  # ── Laravel app (http + queue worker) ──────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    env_file: .env.e2e
+    volumes:
+      - shared:/shared          # reads /shared/webhook_secret written by stripe-cli
+    ports:
+      - "8000:8000"             # handy for debugging from the host
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/courses"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+    depends_on:
+      - stripe-cli
+
+  # ── Stripe CLI: publish signing secret, then forward live webhooks ─────────
+  stripe-cli:
+    image: stripe/stripe-cli:latest
+    env_file: .env.e2e          # provides STRIPE_SECRET inside the container
+    volumes:
+      - shared:/shared
+    # $$ escapes compose interpolation so the literal $STRIPE_SECRET reaches the
+    # shell, where env_file has set it.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "[stripe-cli] fetching webhook signing secret ..."
+        stripe listen --api-key "$$STRIPE_SECRET" --print-secret > /shared/webhook_secret
+        echo "[stripe-cli] secret: $$(cat /shared/webhook_secret)"
+        echo "[stripe-cli] forwarding to http://app:8000/webhooks/stripe"
+        exec stripe listen --api-key "$$STRIPE_SECRET" \
+            --forward-to http://app:8000/webhooks/stripe
+
+  # ── Playwright runner ──────────────────────────────────────────────────────
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.49.0-jammy
+    working_dir: /e2e
+    env_file: .env.e2e          # exposes STRIPE_SECRET for `stripe trigger` helpers
+    environment:
+      BASE_URL: http://app:8000
+    volumes:
+      - ./e2e:/e2e
+    depends_on:
+      app:
+        condition: service_healthy
+    command: ["sh", "-c", "npm ci && npx playwright test"]

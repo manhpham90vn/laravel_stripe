@@ -1,0 +1,17 @@
+{
+  "name": "payment-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright E2E for the Laravel payment app (real Stripe test-mode + Stripe CLI webhooks).",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:happy": "playwright test 01-happy-path",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@types/node": "^25.9.2",
+    "typescript": "^5.9.3"
+  }
+}
