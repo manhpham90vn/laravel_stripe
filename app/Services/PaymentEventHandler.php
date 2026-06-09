@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Order;
 use App\Models\Reservation;
+use App\Payments\PaymentGateway;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -25,8 +26,11 @@ class PaymentEventHandler
         Order::STATUS_PROCESSING => [Order::STATUS_PAID, Order::STATUS_FAILED, Order::STATUS_CANCELED],
         Order::STATUS_PAID => [Order::STATUS_REFUNDED, Order::STATUS_DISPUTED],
         Order::STATUS_DISPUTED => [Order::STATUS_PAID, Order::STATUS_REFUNDED],
-        Order::STATUS_FAILED => [],     // terminal
-        Order::STATUS_CANCELED => [],   // terminal
+        // failed/canceled are terminal for the normal flow; the only way out is
+        // the reclaim-or-refund recovery in markPaid() when a real `succeeded`
+        // lands late (spec §8.2a) — reclaim → paid, or auto-refund → refunded.
+        Order::STATUS_FAILED => [Order::STATUS_PAID, Order::STATUS_REFUNDED],
+        Order::STATUS_CANCELED => [Order::STATUS_PAID, Order::STATUS_REFUNDED],
         Order::STATUS_REFUNDED => [],   // terminal
     ];
 
@@ -34,6 +38,7 @@ class PaymentEventHandler
         private ReservationService $reservations,
         private EnrollmentService $enrollments,
         private AuditLogger $audit,
+        private PaymentGateway $gateway,
     ) {}
 
     /**
@@ -69,32 +74,96 @@ class PaymentEventHandler
         return true;
     }
 
-    /** payment_intent.succeeded → paid + enrollment (spec §8.2). */
+    /**
+     * payment_intent.succeeded → paid + enrollment (spec §8.2).
+     *
+     * Normal path (pending/processing): the slot is still held, so just consume
+     * it and grant access. Recovery path (canceled/failed): the slot was already
+     * released, so reclaim-or-refund (§8.2a) — try to grab a seat back; if none
+     * is free, refund the late charge. The Stripe refund call is deferred until
+     * after the transaction commits so we never hold row locks across a network
+     * call.
+     */
     public function markPaid(Order $order, array $meta = []): void
     {
-        DB::transaction(function () use ($order, $meta) {
+        $refundOrderId = null;
+
+        DB::transaction(function () use ($order, $meta, &$refundOrderId) {
             $order = Order::whereKey($order->id)->lockForUpdate()->with('reservation')->firstOrFail();
 
-            $ok = $this->transition($order, Order::STATUS_PAID, [
+            if ($order->status === Order::STATUS_PAID) {
+                return; // idempotent — already settled
+            }
+
+            // BR-11 / §2.9: never grant on an amount that doesn't match the
+            // server-side snapshot. Hold for ops rather than silently enrolling.
+            if (isset($meta['amount']) && (int) $meta['amount'] !== (int) $order->amount) {
+                Log::warning('Amount mismatch on succeeded payment — not granting', [
+                    'order_id' => $order->id, 'db' => $order->amount, 'stripe' => $meta['amount'],
+                ]);
+
+                return;
+            }
+
+            $paidAttributes = [
                 'paid_at' => now(),
                 'payment_method_type' => $meta['payment_method_type'] ?? $order->payment_method_type,
                 'stripe_charge_id' => $meta['charge_id'] ?? $order->stripe_charge_id,
                 // Replace the Checkout session placeholder with the real PI id so
                 // refunds / disputes / reconciliation resolve by PaymentIntent.
                 'stripe_payment_intent_id' => $meta['payment_intent_id'] ?? $order->stripe_payment_intent_id,
-            ], 'webhook', null, $meta);
+            ];
 
-            if (! $ok) {
+            // Normal path — the hold is still in place.
+            if (in_array($order->status, [Order::STATUS_PENDING, Order::STATUS_PROCESSING], true)) {
+                if (! $this->transition($order, Order::STATUS_PAID, $paidAttributes, 'webhook', null, $meta)) {
+                    return;
+                }
+
+                if ($order->reservation) {
+                    $this->reservations->consume($order->reservation);
+                }
+
+                $order->loadMissing('saleBatch');
+                $this->enrollments->grant($order);
+
                 return;
             }
 
-            if ($order->reservation) {
-                $this->reservations->consume($order->reservation);
-            }
+            // Recovery path (§8.2a) — slot already released; reclaim or refund.
+            if (in_array($order->status, [Order::STATUS_CANCELED, Order::STATUS_FAILED], true)) {
+                if ($this->reservations->reclaim($order)) {
+                    if ($this->transition($order, Order::STATUS_PAID, $paidAttributes, 'webhook', null, $meta + ['recovery' => 'reclaimed'])) {
+                        $order->loadMissing('saleBatch');
+                        $this->enrollments->grant($order);
+                    }
 
-            $order->loadMissing('saleBatch');
-            $this->enrollments->grant($order);
+                    return;
+                }
+
+                // No seat available — persist the charge ref and refund it after
+                // commit; the charge.refunded webhook converges order → refunded.
+                $order->update([
+                    'stripe_charge_id' => $meta['charge_id'] ?? $order->stripe_charge_id,
+                    'stripe_payment_intent_id' => $meta['payment_intent_id'] ?? $order->stripe_payment_intent_id,
+                ]);
+
+                if ($order->stripe_charge_id) {
+                    $refundOrderId = $order->id;
+                } else {
+                    Log::error('Late payment on dead order but no charge to refund', [
+                        'order_id' => $order->id,
+                    ]);
+                }
+            }
         });
+
+        if ($refundOrderId !== null) {
+            Log::warning('Late payment on a sold-out dead order — auto-refunding', [
+                'order_id' => $refundOrderId,
+            ]);
+            $this->gateway->refund(Order::findOrFail($refundOrderId));
+        }
     }
 
     /**

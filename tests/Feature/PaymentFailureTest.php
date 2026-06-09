@@ -6,6 +6,7 @@ use App\Models\Enrollment;
 use App\Models\Order;
 use App\Models\Reservation;
 use App\Models\SaleBatch;
+use App\Payments\PaymentGateway;
 use App\Services\PaymentEventHandler;
 use App\Services\StripeEventProcessor;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -80,16 +81,60 @@ class PaymentFailureTest extends TestCase
         $this->assertEquals(Order::STATUS_PENDING, $order->fresh()->status);
     }
 
-    /** A succeeded webhook arriving on a canceled order cannot resurrect it. */
-    public function test_paid_cannot_follow_canceled(): void
+    /**
+     * A late `succeeded` on a canceled order must NOT be swallowed (§8.2a):
+     * when a seat is still free the order is reclaimed back to paid + enrolled.
+     */
+    public function test_late_success_on_canceled_reclaims_slot_when_available(): void
     {
-        $order = $this->reserve($this->onSaleBatch());
+        $batch = $this->onSaleBatch(capacity: 5);
+        $order = $this->reserve($batch);
         app(PaymentEventHandler::class)->cancel($order, $order->user_id);
         $this->assertEquals(Order::STATUS_CANCELED, $order->fresh()->status);
 
-        app(PaymentEventHandler::class)->markPaid($order->fresh(), ['payment_intent_id' => 'pi_late']);
+        app(PaymentEventHandler::class)->markPaid($order->fresh(), [
+            'payment_intent_id' => 'pi_late', 'charge_id' => 'ch_late',
+        ]);
+
+        $this->assertEquals(Order::STATUS_PAID, $order->fresh()->status);
+        $this->assertDatabaseHas('enrollments', ['order_id' => $order->id, 'status' => Enrollment::STATUS_ACTIVE]);
+        $this->assertEquals(1, $batch->fresh()->slots_taken);
+    }
+
+    /**
+     * A late `succeeded` on a dead order with no seat left (§8.2a): the order is
+     * not resurrected — the charge is refunded and no enrollment is granted.
+     */
+    public function test_late_success_on_dead_order_refunds_when_sold_out(): void
+    {
+        $batch = $this->onSaleBatch(capacity: 1);
+        $order = $this->reserve($batch);
+        app(PaymentEventHandler::class)->cancel($order, $order->user_id);
+
+        // Someone else takes the freed seat — the batch is now sold out.
+        $this->reserve($batch);
+        $this->assertEquals(1, $batch->fresh()->slots_taken);
+
+        $this->mock(PaymentGateway::class)->shouldReceive('refund')->once();
+
+        app(PaymentEventHandler::class)->markPaid($order->fresh(), [
+            'payment_intent_id' => 'pi_late', 'charge_id' => 'ch_late',
+        ]);
 
         $this->assertEquals(Order::STATUS_CANCELED, $order->fresh()->status);
+        $this->assertDatabaseMissing('enrollments', ['order_id' => $order->id]);
+    }
+
+    /** BR-11: an amount that doesn't match the snapshot must not grant access. */
+    public function test_amount_mismatch_does_not_grant(): void
+    {
+        $order = $this->reserve($this->onSaleBatch());
+
+        app(PaymentEventHandler::class)->markPaid($order->fresh(), [
+            'payment_intent_id' => 'pi_x', 'charge_id' => 'ch_x', 'amount' => 999999,
+        ]);
+
+        $this->assertEquals(Order::STATUS_PENDING, $order->fresh()->status);
         $this->assertDatabaseMissing('enrollments', ['order_id' => $order->id]);
     }
 }

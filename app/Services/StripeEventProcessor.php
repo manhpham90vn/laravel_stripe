@@ -47,6 +47,7 @@ class StripeEventProcessor
                     'payment_method_type' => $object['payment_method_type'] ?? null,
                     'charge_id' => $object['latest_charge'] ?? ($object['charge'] ?? null),
                     'payment_intent_id' => $object['id'] ?? null,
+                    'amount' => $object['amount_received'] ?? ($object['amount'] ?? null),
                 ]),
                 'payment_intent.processing' => $this->handler->markProcessing($order, [
                     'payment_method_type' => $object['payment_method_type'] ?? 'konbini',

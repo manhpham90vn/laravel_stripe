@@ -132,6 +132,10 @@ pending ──(thanh toán đồng bộ thành công: card)───────
 
 paid ──(refund toàn phần)──► refunded         (enrollment → revoked)
 paid ──(chargeback/dispute thắng phía khách)──► disputed/refunded (enrollment → revoked)
+
+# Phục hồi "succeeded đến muộn" trên đơn đã chết (reclaim-or-refund — §8.2a):
+canceled/failed ──(succeeded tới muộn, CÒN slot)──► paid     (giành lại slot + cấp enrollment)
+canceled/failed ──(succeeded tới muộn, HẾT slot)──► refunded (auto-refund qua Stripe)
 ```
 
 | Status | Ý nghĩa | Slot đang chiếm? |
@@ -139,13 +143,20 @@ paid ──(chargeback/dispute thắng phía khách)──► disputed/refunded 
 | `pending` | Vừa tạo, chờ user trả tiền (đồng bộ) | Phương án A: có (qua reservation). Phương án B: chưa |
 | `processing` | Async — đã đặt voucher, chờ tiền về | Có (giữ tới `reserved_until`) |
 | `paid` | Tiền đã về, enrollment đã cấp | Có (vĩnh viễn cho tới refund) |
-| `failed` | Thanh toán thất bại | Không (nhả nếu từng giữ) |
-| `canceled` | Hủy/hết hạn chưa trả | Không (nhả) |
+| `failed` | Thanh toán thất bại | Không (nhả nếu từng giữ) — *xem ghi chú phục hồi* |
+| `canceled` | Hủy/hết hạn chưa trả | Không (nhả) — *xem ghi chú phục hồi* |
 | `refunded` | Đã hoàn tiền | Tùy chính sách §10 BR-7 |
 
 > Mọi chuyển trạng thái **chỉ xảy ra qua webhook** (trừ `pending` lúc khởi tạo và
 > `canceled` do job/người dùng hủy chủ động). Redirect "success" từ Stripe **không**
 > được dùng để set `paid`.
+>
+> **Ghi chú phục hồi (reclaim-or-refund — §8.2a, BR-6):** `canceled`/`failed` là
+> terminal cho luồng thường, **nhưng** không phải ngõ cụt khi tiền thật đã về: nếu
+> `payment_intent.succeeded` tới muộn (slot đã nhả) thì handler **không được nuốt** —
+> phải giành lại slot trong lock (còn → `paid` + cấp enrollment; hết → **auto-refund**
+> qua Stripe → `refunded`). Đây là 2 cạnh duy nhất ra khỏi `canceled`/`failed`, và chỉ
+> đi qua đường phục hồi này (không phải transition tùy ý).
 
 ### 5.2 Enrollment status
 `active` (cấp khi order→`paid`) → `revoked` (khi refund/dispute). Không có trạng thái trung gian.
@@ -192,6 +203,12 @@ COMMIT
 Nhả slot (job định kỳ + khi webhook failed/canceled):
 ```
 với mỗi reservation active mà reserved_until < now và order chưa paid:
+  # §1.3: KHÔNG nhả mù — kiểm tra PaymentIntent trước (chống race "nhả oan")
+  nếu order có PI:
+     pi = retrieve(PI)
+     pi.status ∈ {processing, requires_action, requires_capture} → gia hạn, chờ tiếp
+     pi.status == succeeded                                       → markPaid (tiền đã về)
+     ngược lại (PI chết / không có)                               → nhả
   BEGIN; lock batch; reservation→expired; slots_taken -= 1;
          nếu batch sold_out & còn trong cửa sổ → on_sale; COMMIT
 ```
@@ -294,7 +311,7 @@ Admin bấm refund → gọi Stripe refund → webhook charge.refunded
 | Event | Hành động |
 |-------|-----------|
 | `checkout.session.completed` | (nếu dùng Checkout) đánh dấu phiên hoàn tất; với async là "đã đặt voucher" |
-| `payment_intent.succeeded` | order→`paid`, consume reservation, cấp enrollment |
+| `payment_intent.succeeded` | order→`paid`, consume reservation, cấp enrollment. **Nếu đơn đã `canceled`/`failed`** → reclaim-or-refund (§8.2a) |
 | `payment_intent.processing` | order→`processing` (async, đã đặt voucher) |
 | `payment_intent.payment_failed` | order→`failed`/`canceled`, nhả slot |
 | `charge.refunded` | order→`refunded`, enrollment→`revoked` |
@@ -303,6 +320,31 @@ Admin bấm refund → gọi Stripe refund → webhook charge.refunded
 > Bảng chi tiết về xử lý từng case (TTL, async, dispute) tham chiếu
 > [`payment_solutions.md`](./payment_solutions.md) — spec này không lặp lại logic đó,
 > chỉ map vào ngữ cảnh khóa học (enrollment thay cho "giao hàng").
+
+### 8.2a Phục hồi `succeeded` đến muộn trên đơn đã chết (reclaim-or-refund)
+
+**Vấn đề:** Đơn đã `canceled` (hết TTL/hủy) hoặc `failed` (đã nhả slot) rồi
+`payment_intent.succeeded` mới tới — **tiền đã bị Stripe trừ thật**. Nếu handler chỉ
+chặn theo state machine và bỏ qua thì khách mất tiền oan: trả tiền nhưng không có
+enrollment và cũng không được hoàn. (Đối chiếu [`payment_solutions.md` §2.8a](./payment_solutions.md).)
+
+**Quy tắc — reclaim-or-refund** (áp dụng cho cả PA A; xem BR-6):
+
+1. Trong transaction có lock `sale_batches`, **thử giành lại slot**:
+   - **Còn slot** (và user chưa có order live khác cho đợt này — BR-2) → tăng `slots_taken`,
+     order `canceled/failed → paid`, cấp enrollment. Khách giữ được khóa.
+   - **Hết slot** (hoặc user đã có order live khác) → **auto-refund** toàn bộ qua Stripe;
+     `charge.refunded` webhook sẽ đưa order `→ refunded`. Khách được trả lại tiền.
+2. **Đối chiếu số tiền trước khi cấp** (xem [`payment_solutions.md` §2.9](./payment_solutions.md)):
+   nếu `amount` Stripe trả về ≠ `orders.amount` thì **không** cấp enrollment — giữ
+   nguyên trạng thái, ghi log mức cảnh báo để ops/admin xử lý thủ công.
+3. **Tầng phòng ngừa (§1.3 payment_solutions):** job nhả slot (`ReleaseExpiredReservations`)
+   trước khi nhả **phải** kiểm tra trạng thái PaymentIntent — PI còn sống
+   (`processing`/`requires_action`/`requires_capture`) → gia hạn chờ; PI `succeeded` →
+   đưa thẳng lên `paid`; chỉ nhả khi PI thật sự chết. Giảm tối đa khả năng rơi vào nhánh phục hồi.
+4. **Lưới cứu (reconcile):** job `ReconcileStripeOrders` (deep run) **phải quét cả đơn
+   `canceled`/`failed`** còn PI, không chỉ `pending`/`processing` — nếu không nhánh phục
+   hồi sẽ không bao giờ kích hoạt cho đơn đã chết khi webhook bị mất.
 
 ### 8.3 Idempotency cấp xử lý
 Mọi handler webhook phải **an toàn khi gọi lại**: trước khi cấp enrollment, kiểm tra
@@ -372,11 +414,12 @@ order đã `paid` chưa / enrollment đã tồn tại chưa. Dùng `unique(order
 | **BR-3** | `amount` luôn lấy từ `sale_batches.price` phía server tại thời điểm checkout; lưu snapshot vào `orders.amount` (giá đợt đổi sau không ảnh hưởng đơn cũ). |
 | **BR-4** | Chỉ cấp enrollment khi order→`paid` qua webhook. Redirect success **không** cấp quyền. |
 | **BR-5** | Webhook xử lý **idempotent**: event trùng (đã có trong `processed_stripe_events`) bị bỏ qua; không trừ slot/cấp enrollment lần 2. |
-| **BR-6** | (Chỉ PA B) Nếu lúc webhook succeeded mà hết slot → **refund tự động** + order→refunded + thông báo; không cấp enrollment. |
+| **BR-6** | **Tiền về nhưng không cấp được slot → refund tự động.** (PA B) Lúc webhook succeeded mà hết slot → refund + order→refunded + thông báo. (PA A) `succeeded` đến muộn trên đơn đã `canceled`/`failed` → **reclaim-or-refund** (§8.2a): còn slot thì giành lại + lên `paid` + cấp enrollment; hết slot thì auto-refund → `refunded`. Tuyệt đối không để "đã trừ tiền mà đơn chết, không ai xử lý". |
 | **BR-7** | Refund toàn phần → enrollment→`revoked`. **Chính sách nhả slot khi refund:** mặc định **KHÔNG** tự nhả slot cho người mua khác (tránh dao động số liệu/đối soát); admin quyết định mở slot mới nếu muốn. *(Quyết định cuối cùng để lại cho lúc triển khai.)* |
 | **BR-8** | TTL giữ chỗ phụ thuộc `payment_method_type`: card ngắn, async = theo hạn voucher Stripe. |
 | **BR-9** | Đợt tự chuyển `sold_out` khi `slots_taken==capacity`; tự `closed` khi quá `sale_ends_at`. |
 | **BR-10** | Mọi chuyển trạng thái order/enrollment ghi `audit_logs` (NFR-3). |
+| **BR-11** | **Đối chiếu số tiền trước khi cấp enrollment:** nếu `amount` Stripe trả về (`amount_received`) ≠ `orders.amount` thì **không** lên `paid`/không cấp enrollment — giữ nguyên trạng thái + ghi log cảnh báo cho ops xử lý (§8.2a, `payment_solutions.md` §2.9). |
 
 ---
 

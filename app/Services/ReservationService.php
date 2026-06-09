@@ -116,6 +116,53 @@ class ReservationService
         });
     }
 
+    /**
+     * Re-acquire a slot for an order whose hold was already released — a late
+     * `payment_intent.succeeded` landed on a canceled/failed order (spec §8.2a
+     * reclaim-or-refund). Returns false when no seat is free, or when the buyer
+     * already holds another live order for the batch (BR-2): in both cases the
+     * caller must refund the late charge instead of resurrecting this order.
+     */
+    public function reclaim(Order $order): bool
+    {
+        return DB::transaction(function () use ($order) {
+            $batch = SaleBatch::whereKey($order->sale_batch_id)->lockForUpdate()->firstOrFail();
+
+            // Another live/paid order for this (user, batch) already holds the
+            // seat — resurrecting this one would double-book and break BR-2.
+            $hasOtherLive = Order::where('sale_batch_id', $batch->id)
+                ->where('user_id', $order->user_id)
+                ->where('id', '!=', $order->id)
+                ->whereIn('status', Order::LIVE_STATUSES)
+                ->exists();
+
+            if ($hasOtherLive || $batch->slots_taken >= $batch->capacity) {
+                return false;
+            }
+
+            // The freed reservation is gone; record a fresh consumed one so the
+            // seat is permanently attributed to this order.
+            $reservation = Reservation::create([
+                'sale_batch_id' => $batch->id,
+                'user_id' => $order->user_id,
+                'status' => Reservation::STATUS_CONSUMED,
+                'reserved_until' => now(),
+            ]);
+
+            $batch->slots_taken++;
+            if ($batch->slots_taken >= $batch->capacity && $batch->status === SaleBatch::STATUS_ON_SALE) {
+                $prev = $batch->status;
+                $batch->status = SaleBatch::STATUS_SOLD_OUT;
+                $this->audit->record($batch, $prev, SaleBatch::STATUS_SOLD_OUT, 'system');
+            }
+            $batch->save();
+
+            $order->update(['reservation_id' => $reservation->id]);
+
+            return true;
+        });
+    }
+
     /** Mark a reservation consumed (its slot is now permanently taken). */
     public function consume(Reservation $reservation): void
     {

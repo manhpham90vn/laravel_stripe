@@ -7,6 +7,7 @@ use App\Jobs\SyncBatchStatuses;
 use App\Models\Order;
 use App\Models\Reservation;
 use App\Models\SaleBatch;
+use App\Payments\PaymentGateway;
 use App\Services\AuditLogger;
 use App\Services\PaymentEventHandler;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -30,7 +31,7 @@ class ScheduledJobsTest extends TestCase
         $order->update(['reserved_until' => now()->subMinute()]);
         $order->reservation->update(['reserved_until' => now()->subMinute()]);
 
-        app(ReleaseExpiredReservations::class)->handle(app(PaymentEventHandler::class));
+        app(ReleaseExpiredReservations::class)->handle(app(PaymentGateway::class), app(PaymentEventHandler::class));
 
         $this->assertEquals(Order::STATUS_CANCELED, $order->fresh()->status);
         $this->assertEquals(Reservation::STATUS_RELEASED, $order->reservation->fresh()->status);
@@ -45,10 +46,48 @@ class ScheduledJobsTest extends TestCase
         $future = $this->reserve($this->onSaleBatch());          // reserved_until in the future
         $paid = $this->paidOrder();                              // paid, slot kept permanently
 
-        app(ReleaseExpiredReservations::class)->handle(app(PaymentEventHandler::class));
+        app(ReleaseExpiredReservations::class)->handle(app(PaymentGateway::class), app(PaymentEventHandler::class));
 
         $this->assertEquals(Order::STATUS_PENDING, $future->fresh()->status);
         $this->assertEquals(Order::STATUS_PAID, $paid->fresh()->status);
+    }
+
+    /** §1.3: an expired hold whose PaymentIntent already succeeded converges to paid, not canceled. */
+    public function test_release_converges_to_paid_when_payment_already_succeeded(): void
+    {
+        $batch = $this->onSaleBatch(capacity: 1);
+        $order = $this->reserve($batch);
+        $order->update(['stripe_payment_intent_id' => 'pi_'.$order->id, 'reserved_until' => now()->subMinute()]);
+        $order->reservation->update(['reserved_until' => now()->subMinute()]);
+
+        $gateway = $this->mock(PaymentGateway::class);
+        $gateway->shouldReceive('retrievePaymentIntentForOrder')->once()->andReturn([
+            'id' => 'pi_'.$order->id, 'status' => 'succeeded', 'amount' => 10000,
+            'latest_charge' => 'ch_'.$order->id, 'payment_method_type' => 'card',
+        ]);
+
+        app(ReleaseExpiredReservations::class)->handle($gateway, app(PaymentEventHandler::class));
+
+        $this->assertEquals(Order::STATUS_PAID, $order->fresh()->status);
+        $this->assertEquals(1, $batch->fresh()->slots_taken);
+        $this->assertDatabaseHas('enrollments', ['order_id' => $order->id]);
+    }
+
+    /** §1.3: a payment still in flight (3DS/voucher) is given more time, not released. */
+    public function test_release_extends_hold_when_payment_in_flight(): void
+    {
+        $order = $this->reserve($this->onSaleBatch());
+        $order->update(['stripe_payment_intent_id' => 'pi_'.$order->id, 'reserved_until' => now()->subMinute()]);
+
+        $gateway = $this->mock(PaymentGateway::class);
+        $gateway->shouldReceive('retrievePaymentIntentForOrder')->once()->andReturn([
+            'id' => 'pi_'.$order->id, 'status' => 'requires_action',
+        ]);
+
+        app(ReleaseExpiredReservations::class)->handle($gateway, app(PaymentEventHandler::class));
+
+        $this->assertEquals(Order::STATUS_PENDING, $order->fresh()->status);
+        $this->assertTrue($order->fresh()->reserved_until->isFuture());
     }
 
     public function test_sync_opens_scheduled_batches_whose_window_started(): void
