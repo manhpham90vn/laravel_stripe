@@ -32,6 +32,24 @@ return [
         'stuck_after_minutes' => env('RECONCILE_STUCK_AFTER_MINUTES', 30),
     ],
 
+    /*
+    | processed_stripe_events housekeeping (payment_solutions §2.8 review #8).
+    | Stripe stops retrying after a few days, so the idempotency markers can be
+    | pruned once they are older than this without weakening dedup.
+    */
+    'processed_events' => [
+        'retention_days' => env('PROCESSED_EVENTS_RETENTION_DAYS', 60),
+    ],
+
+    /*
+    | Checkout abuse guard (payment_solutions §1.2 review #7). Reserving a slot
+    | on "Mua" lets a user hold inventory, so rate-limit checkout attempts per
+    | authenticated user (falls back to IP for safety).
+    */
+    'rate_limit' => [
+        'checkout_per_minute' => env('CHECKOUT_RATE_LIMIT_PER_MINUTE', 10),
+    ],
+
     'stripe' => [
         'secret' => env('STRIPE_SECRET'),
         'webhook_secret' => env('STRIPE_WEBHOOK_SECRET'),

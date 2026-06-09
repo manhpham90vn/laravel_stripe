@@ -3,8 +3,11 @@
 namespace App\Services;
 
 use App\Models\Order;
+use App\Models\ProcessedStripeEvent;
 use App\Models\Reservation;
 use App\Payments\PaymentGateway;
+use Closure;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -40,6 +43,53 @@ class PaymentEventHandler
         private AuditLogger $audit,
         private PaymentGateway $gateway,
     ) {}
+
+    /**
+     * Run $work inside one transaction that ALSO writes the processed-event
+     * marker first (payment_solutions §2.8): dedup and side-effect commit or
+     * roll back as a unit, so we never "marked but didn't act", and a lost job
+     * that rolls back is safely retried by Stripe. A genuine duplicate trips the
+     * primary-key unique violation and is swallowed (already handled); a
+     * deadlock / lost connection is rethrown so the queue retries it.
+     *
+     * $eventId is null when the caller is not a webhook (reconcile / TTL job):
+     * then there is no marker to write — $work just runs in its own transaction,
+     * relying on the per-order idempotency already baked into each handler.
+     */
+    private function applyEvent(?string $eventId, ?string $eventType, Closure $work): void
+    {
+        try {
+            DB::transaction(function () use ($eventId, $eventType, $work) {
+                if ($eventId !== null) {
+                    ProcessedStripeEvent::create([
+                        'event_id' => $eventId,
+                        'type' => $eventType ?? 'unknown',
+                        'processed_at' => now(),
+                    ]);
+                }
+
+                $work();
+            });
+        } catch (QueryException $e) {
+            if ($eventId !== null && $this->isUniqueViolation($e)) {
+                return; // duplicate delivery — the first one already applied it
+            }
+
+            throw $e;
+        }
+    }
+
+    /** Detect the marker's primary-key clash across sqlite / mysql / postgres. */
+    private function isUniqueViolation(QueryException $e): bool
+    {
+        $sqlState = $e->errorInfo[0] ?? null;
+        $driverCode = $e->errorInfo[1] ?? null;
+
+        return $sqlState === '23505'                 // Postgres unique_violation
+            || ($sqlState === '23000' && $driverCode === 1062) // MySQL ER_DUP_ENTRY
+            || ($driverCode === 19 || $driverCode === 2067)    // SQLite CONSTRAINT / CONSTRAINT_UNIQUE
+            || str_contains($e->getMessage(), 'UNIQUE constraint failed');
+    }
 
     /**
      * Move an order to $to if the jump is legal, persisting $attributes and the
@@ -88,7 +138,7 @@ class PaymentEventHandler
     {
         $refundOrderId = null;
 
-        DB::transaction(function () use ($order, $meta, &$refundOrderId) {
+        $this->applyEvent($meta['event_id'] ?? null, $meta['event_type'] ?? null, function () use ($order, $meta, &$refundOrderId) {
             $order = Order::whereKey($order->id)->lockForUpdate()->with('reservation')->firstOrFail();
 
             if ($order->status === Order::STATUS_PAID) {
@@ -173,24 +223,27 @@ class PaymentEventHandler
      */
     public function onCheckoutCompleted(Order $order, array $meta = []): void
     {
-        if ($pi = $meta['payment_intent_id'] ?? null) {
-            Order::whereKey($order->id)
-                ->where(fn ($q) => $q->whereNull('stripe_payment_intent_id')->orWhere('stripe_payment_intent_id', '!=', $pi))
-                ->update(['stripe_payment_intent_id' => $pi]);
-            $order->refresh();
-        }
+        $this->applyEvent($meta['event_id'] ?? null, $meta['event_type'] ?? null, function () use ($order, $meta) {
+            if ($pi = $meta['payment_intent_id'] ?? null) {
+                Order::whereKey($order->id)
+                    ->where(fn ($q) => $q->whereNull('stripe_payment_intent_id')->orWhere('stripe_payment_intent_id', '!=', $pi))
+                    ->update(['stripe_payment_intent_id' => $pi]);
+                $order->refresh();
+            }
 
-        // Synchronous success arrives via payment_intent.succeeded; only act here
-        // for the async case (voucher placed, payment_status still unpaid).
-        if (($meta['payment_status'] ?? 'paid') !== 'paid' && $order->status === Order::STATUS_PENDING) {
-            $this->markProcessing($order, ['payment_method_type' => $meta['payment_method_type'] ?? 'konbini']);
-        }
+            // Synchronous success arrives via payment_intent.succeeded; only act
+            // here for the async case (voucher placed, payment_status unpaid).
+            // The inner call passes no event_id so it nests without a 2nd marker.
+            if (($meta['payment_status'] ?? 'paid') !== 'paid' && $order->status === Order::STATUS_PENDING) {
+                $this->markProcessing($order, ['payment_method_type' => $meta['payment_method_type'] ?? 'konbini']);
+            }
+        });
     }
 
     /** payment_intent.processing → async voucher placed, slot held (spec §7.2). */
     public function markProcessing(Order $order, array $meta = []): void
     {
-        DB::transaction(function () use ($order, $meta) {
+        $this->applyEvent($meta['event_id'] ?? null, $meta['event_type'] ?? null, function () use ($order, $meta) {
             $order = Order::whereKey($order->id)->lockForUpdate()->with('reservation')->firstOrFail();
 
             $ok = $this->transition($order, Order::STATUS_PROCESSING, [
@@ -208,7 +261,7 @@ class PaymentEventHandler
     /** payment_intent.payment_failed → fail + release the slot. */
     public function markFailed(Order $order, array $meta = []): void
     {
-        DB::transaction(function () use ($order, $meta) {
+        $this->applyEvent($meta['event_id'] ?? null, $meta['event_type'] ?? null, function () use ($order, $meta) {
             $order = Order::whereKey($order->id)->lockForUpdate()->with('reservation')->firstOrFail();
 
             // paid → failed is rejected by the table (a late failure after
@@ -254,7 +307,7 @@ class PaymentEventHandler
     /** charge.refunded → refunded + revoke enrollment (BR-7; slot NOT auto-freed). */
     public function markRefunded(Order $order, array $meta = []): void
     {
-        DB::transaction(function () use ($order, $meta) {
+        $this->applyEvent($meta['event_id'] ?? null, $meta['event_type'] ?? null, function () use ($order, $meta) {
             $order = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
 
             if (! $this->transition($order, Order::STATUS_REFUNDED, [], 'webhook', null, $meta)) {
@@ -268,7 +321,7 @@ class PaymentEventHandler
     /** charge.dispute.created → funds held, outcome pending (spec §5.1, §8.2). */
     public function openDispute(Order $order, array $meta = []): void
     {
-        DB::transaction(function () use ($order, $meta) {
+        $this->applyEvent($meta['event_id'] ?? null, $meta['event_type'] ?? null, function () use ($order, $meta) {
             $order = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
 
             $this->transition($order, Order::STATUS_DISPUTED, [], 'webhook', null, $meta);
@@ -282,7 +335,7 @@ class PaymentEventHandler
      */
     public function closeDispute(Order $order, array $meta = []): void
     {
-        DB::transaction(function () use ($order, $meta) {
+        $this->applyEvent($meta['event_id'] ?? null, $meta['event_type'] ?? null, function () use ($order, $meta) {
             $order = Order::whereKey($order->id)->lockForUpdate()->firstOrFail();
             $outcome = $meta['dispute_status'] ?? null;
 

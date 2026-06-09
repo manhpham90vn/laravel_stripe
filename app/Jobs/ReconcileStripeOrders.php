@@ -67,9 +67,11 @@ class ReconcileStripeOrders implements ShouldQueue
         }
 
         // B. Money check (AC-9): the amount/currency must match the snapshot.
-        if (isset($pi['amount']) && (int) $pi['amount'] !== (int) $order->amount) {
+        // amount_received is the settled figure for a succeeded PI (BR-11).
+        $stripeAmount = $pi['amount_received'] ?? ($pi['amount'] ?? null);
+        if ($stripeAmount !== null && (int) $stripeAmount !== (int) $order->amount) {
             Log::warning('Reconcile: amount mismatch', [
-                'order' => $order->id, 'db' => $order->amount, 'stripe' => $pi['amount'],
+                'order' => $order->id, 'db' => $order->amount, 'stripe' => $stripeAmount,
             ]);
         }
 
@@ -79,7 +81,7 @@ class ReconcileStripeOrders implements ShouldQueue
                 'payment_method_type' => $pi['payment_method_type'] ?? $order->payment_method_type,
                 'charge_id' => $pi['latest_charge'] ?? null,
                 'payment_intent_id' => $pi['id'] ?? null,
-                'amount' => $pi['amount'] ?? null,
+                'amount' => $stripeAmount,
             ]),
             'canceled' => $handler->markFailed($order, ['reason' => 'reconcile: PaymentIntent canceled']),
             default => null, // processing/requires_* → leave; TTL job handles expiry

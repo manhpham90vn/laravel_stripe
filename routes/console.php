@@ -1,5 +1,6 @@
 <?php
 
+use App\Jobs\PruneProcessedStripeEvents;
 use App\Jobs\ReconcileStripeOrders;
 use App\Jobs\ReleaseExpiredReservations;
 use App\Jobs\SyncBatchStatuses;
@@ -24,3 +25,6 @@ Schedule::job(new SyncBatchStatuses)->everyMinute()->withoutOverlapping();
 // Safety net for missed/late Stripe webhooks (jobs_and_scheduler §5).
 Schedule::job(new ReconcileStripeOrders)->everyFifteenMinutes()->withoutOverlapping();
 Schedule::job(new ReconcileStripeOrders(deep: true))->dailyAt('03:00')->withoutOverlapping();
+
+// Prune old webhook idempotency markers (payment_solutions §2.8 review #8).
+Schedule::job(new PruneProcessedStripeEvents)->dailyAt('04:00')->withoutOverlapping();

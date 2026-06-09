@@ -77,7 +77,7 @@ class ReleaseExpiredReservations implements ShouldQueue
                 'payment_method_type' => $pi['payment_method_type'] ?? $order->payment_method_type,
                 'charge_id' => $pi['latest_charge'] ?? null,
                 'payment_intent_id' => $pi['id'] ?? null,
-                'amount' => $pi['amount'] ?? null,
+                'amount' => $pi['amount_received'] ?? ($pi['amount'] ?? null),  // BR-11
             ]);
 
             return true;

@@ -27,6 +27,23 @@ class StripeGateway implements PaymentGateway
     {
         $order->loadMissing('saleBatch.course');
 
+        $session = $this->client()->checkout->sessions->create($this->checkoutParams($order), [
+            'idempotency_key' => $this->idempotencyKey('checkout', $order),   // spec §8.1
+        ]);
+
+        $order->update(['stripe_payment_intent_id' => $session->payment_intent ?? $session->id]);
+
+        return new CheckoutSession($session->url, $session->id);
+    }
+
+    /**
+     * Build the Checkout Session params. Extracted from createCheckout so the
+     * money/method/voucher rules can be asserted without hitting Stripe.
+     *
+     * @return array<string,mixed>
+     */
+    public function checkoutParams(Order $order): array
+    {
         $params = [
             'mode' => 'payment',
             'line_items' => [[
@@ -52,13 +69,16 @@ class StripeGateway implements PaymentGateway
             $params['payment_method_types'] = $methods;
         }
 
-        $session = $this->client()->checkout->sessions->create($params, [
-            'idempotency_key' => $this->idempotencyKey('checkout', $order),   // spec §8.1
-        ]);
+        // Konbini: pin the voucher's lifetime to our async slot-hold TTL so the
+        // seat is held for exactly as long as the customer has to pay, no longer
+        // (payment_solutions §1.2 / spec BR-8). Without this the voucher uses
+        // Stripe's default (~3 days) which can drift from reserved_until.
+        if (empty($methods) || in_array('konbini', $methods, true)) {
+            $days = max(1, min(60, (int) config('payment.ttl.async_days')));
+            $params['payment_method_options']['konbini']['expires_after_days'] = $days;
+        }
 
-        $order->update(['stripe_payment_intent_id' => $session->payment_intent ?? $session->id]);
-
-        return new CheckoutSession($session->url, $session->id);
+        return $params;
     }
 
     public function refund(Order $order): void

@@ -40,9 +40,13 @@ Route::post('/logout', [AuthenticatedSessionController::class, 'destroy'])->midd
 |----------------------------------------------------------------------------
 */
 Route::middleware('auth')->group(function () {
-    Route::post('/batches/{id}/checkout', [CheckoutController::class, 'store'])->name('checkout.store');
+    Route::post('/batches/{id}/checkout', [CheckoutController::class, 'store'])
+        ->middleware('throttle:checkout')   // §1.2: stop slot hoarding via repeated checkout
+        ->name('checkout.store');
     Route::get('/orders/{id}', [OrderController::class, 'show'])->name('orders.show');
-    Route::post('/orders/{id}/pay', [CheckoutController::class, 'pay'])->name('orders.pay');
+    Route::post('/orders/{id}/pay', [CheckoutController::class, 'pay'])
+        ->middleware('throttle:checkout')
+        ->name('orders.pay');
     Route::post('/orders/{id}/cancel', [OrderController::class, 'cancel'])->name('orders.cancel');
     Route::get('/my/courses', [MyCourseController::class, 'index'])->name('my.courses');
 });
