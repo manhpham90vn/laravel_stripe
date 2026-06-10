@@ -9,6 +9,9 @@
 | **Webhook** xử lý không an toàn (trùng lặp / không verify / tin client) | Đơn sai trạng thái, gian lận, dữ liệu loạn |
 | Không chờ **trạng thái cuối** của thanh toán (SCA / async) | Fulfill nhầm khi tiền chưa thực sự về |
 | Thiếu **đối soát + xử lý dispute** | Lệch Stripe ↔ DB, mất tiền do khiếu nại |
+| Bỏ sót **refund một phần / capture thủ công** | Reverse sai số lượng/tiền, tiền treo ở trạng thái `requires_capture` |
+| Đối soát theo tiền **gross** thay vì **net/settled** | Báo lệch giả, không khớp payout thực (đã trừ phí) |
+| Quản lý **secret / PCI** lỏng lẻo | Lộ API key, mở rộng phạm vi PCI, bị giả mạo request |
 
 ---
 
@@ -153,6 +156,37 @@ phá vỡ state machine (xem 3.2).
 **Cần có:** Khóa theo đơn khi xử lý (row-lock / `SELECT ... FOR UPDATE` / optimistic
 version) để đảm bảo các chuyển trạng thái diễn ra tuần tự.
 
+### 2.11. Capture thủ công (auth-and-capture)
+
+**Mô tả:** Không phải lúc nào cũng "thu tiền ngay". Có mô hình **giữ tiền trước
+(authorize), thu sau (capture)** — PaymentIntent ở trạng thái `requires_capture`. Phát
+sinh nhiều vấn đề riêng:
+
+- **Auth hết hạn:** khoản giữ chỉ sống ~7 ngày (tùy phương thức), không capture kịp →
+  tiền tự nhả, đơn kẹt nếu code tưởng "đã có tiền".
+- **Capture thiếu (partial capture):** chỉ thu một phần khoản đã giữ; phần còn lại nhả về khách.
+- **Quên capture:** tiền bị giữ trên thẻ khách nhưng merchant không bao giờ nhận.
+
+> ⚠️ `requires_capture` **không phải** là "đã trả tiền". Phải có job theo dõi và capture
+> (hoặc cancel) trước khi auth hết hạn; chỉ coi là `paid` sau khi capture thành công.
+
+### 2.12. PaymentIntent bị hủy (`payment_intent.canceled`)
+
+**Mô tả:** PI có thể chuyển sang `canceled` (hủy tay, auth hết hạn, hoặc tự hủy theo
+cấu hình). Nếu hệ thống chỉ chờ `payment_failed` để nhả kho/đóng đơn thì những đơn có PI
+`canceled` sẽ **kẹt `pending`** cho tới khi timer/reconciliation dọn — chậm và dễ sót.
+
+**Cần có:** Xử lý riêng event `payment_intent.canceled` → đóng đơn + nhả giữ chỗ ngay.
+
+### 2.13. Số tiền dưới ngưỡng tối thiểu / bằng 0
+
+**Mô tả:** Stripe có **ngưỡng charge tối thiểu theo từng currency** (ví dụ JPY ~¥50,
+USD ~$0.50). Khi áp coupon/giảm giá làm `amount` về 0 hoặc dưới ngưỡng, tạo charge sẽ
+**lỗi** — cần đường đi riêng (đơn miễn phí thì fulfill thẳng không qua Stripe).
+
+**Cần có:** Validate `amount` so với ngưỡng trước khi tạo charge; nhánh `amount == 0`
+xử lý như "đơn free" (cấp quyền/fulfill mà không gọi Stripe).
+
 ---
 
 ## 3. Nhóm vấn đề về tính nhất quán (Consistency)
@@ -200,6 +234,27 @@ một job định kỳ **so khớp Stripe ↔ DB** để phát hiện đơn lệ
 
 **Cần có:** Scheduled job đối soát (theo giờ/ngày) + cảnh báo khi phát hiện sai lệch.
 
+### 3.5. Đối soát theo tiền GROSS thay vì NET / settled
+
+**Mô tả:** Đối soát chỉ so `amount` của đơn với `amount` của charge là **chưa đủ** để
+khớp dòng tiền thực. Số tiền **thực nhận (payout)** = `amount` − **phí Stripe** − refund −
+phí dispute. Nếu đối soát kế toán so đơn (gross) với tiền về tài khoản ngân hàng (net)
+sẽ luôn báo "lệch" giả.
+
+**Cần có:** Khi cần khớp dòng tiền, đối soát qua **`balance_transaction` / settled amount**
+(số đã trừ phí), không phải charge amount. Phân biệt rõ "đối soát trạng thái đơn" (dùng
+amount) và "đối soát kế toán/payout" (dùng net).
+
+### 3.6. Thiếu nhật ký & cảnh báo (Observability / Audit)
+
+**Mô tả:** Mọi cơ chế trên đều có thể lỗi âm thầm. Nếu không **ghi log mọi lần chuyển
+trạng thái tiền** (ai/cái gì, từ trạng thái nào sang trạng thái nào, do event Stripe nào)
+và không **cảnh báo khi reconciliation phát hiện lệch**, sự cố sẽ chỉ lộ ra khi khách
+khiếu nại.
+
+**Cần có:** Audit log cho transition tiền/đơn (kèm `event.id`), và alert (email/Slack)
+khi: reconciliation thấy lệch, job vào `failed_jobs`, refund/dispute phát sinh.
+
 ---
 
 ## 4. Nhóm vấn đề về bảo mật (Security)
@@ -220,6 +275,35 @@ nhận hàng miễn phí.
 
 > ✅ **Nguyên tắc:** Luôn verify chữ ký webhook bằng signing secret của Stripe trước
 > khi xử lý bất kỳ event nào.
+
+### 4.3. Quản lý API key / secret lỏng lẻo
+
+**Mô tả:** `secret key` (sk_live_…) và `webhook signing secret` (whsec_…) bị commit vào
+repo, log ra ngoài, hoặc dùng chung 1 key full-quyền cho mọi nơi → một chỗ rò rỉ là mất
+toàn quyền tài khoản Stripe.
+
+**Cần có:**
+- Secret chỉ nằm trong **biến môi trường / secret manager**, không commit, không log.
+- Tách **test ↔ live** key; dùng **restricted key** (quyền tối thiểu) cho service phụ.
+- Có quy trình **rotate** khi nghi lộ.
+
+### 4.4. Phạm vi PCI / chạm vào dữ liệu thẻ
+
+**Mô tả:** Nếu số thẻ (PAN) đi qua server của bạn, phạm vi tuân thủ **PCI-DSS** phình to
+khủng khiếp. Sai lầm là tự dựng form thẻ rồi gửi PAN lên backend.
+
+> ✅ **Nguyên tắc:** Không bao giờ để raw PAN chạm backend. Dùng **Stripe Checkout /
+> Stripe.js / Payment Element** để Stripe cầm dữ liệu thẻ; server chỉ thấy token/PI id.
+> Đây là lý do nền tảng của cả kiến trúc, không chỉ là "tiện".
+
+### 4.5. IDOR — xem/sửa đơn của người khác
+
+**Mô tả:** Trang trạng thái đơn (`/orders/{id}`, `/success?session_id=…`) nếu chỉ tra
+theo id/session mà **không kiểm tra chủ sở hữu**, kẻ xấu đổi id sẽ xem được đơn người khác
+(thông tin cá nhân, số tiền), hoặc thao tác nhầm đơn.
+
+**Cần có:** Mọi truy cập đơn phải kiểm tra `order.user_id == auth user` (hoặc quyền admin);
+không dựa vào tính "khó đoán" của id/session.
 
 ---
 
@@ -252,6 +336,27 @@ qua hệ thống của bạn. Nếu chỉ cập nhật DB khi hành động bắ
 **Cần có:** Coi webhook (`charge.refunded`, `charge.refund.updated`) là nguồn sự thật cho
 **mọi** thay đổi — kể cả thao tác tay từ Dashboard — và đồng bộ ngược về DB (xem 3.4).
 
+### 5.4. Refund một phần (partial refund)
+
+**Mô tả:** Refund không phải lúc nào cũng full. Khi refund một phần (`amount_refunded <
+amount`), event `charge.refunded` **vẫn bắn**. Nếu handler mặc định "đã refund → reverse
+toàn bộ" (hoàn toàn bộ kho / thu hồi toàn bộ quyền / set `refunded`) thì **sai**: khách
+mới được trả lại một phần nhưng hệ thống coi như hủy sạch.
+
+**Cần có:** Đọc `amount_refunded` vs `amount` để phân biệt **partial vs full**; quyết định
+rõ trạng thái (`partially_refunded` vs `refunded`) và side-effect tương ứng. Nếu nghiệp vụ
+**không hỗ trợ** partial thì phải **tuyên bố rõ** và chặn từ đầu.
+
+### 5.5. Dòng tiền của dispute (`funds_withdrawn` / `funds_reinstated`)
+
+**Mô tả:** Một dispute kéo theo nhiều bước tiền: ngân hàng **rút tạm** tiền
+(`charge.dispute.funds_withdrawn`) + thu **phí dispute**; nếu thắng kiện tiền được
+**hoàn lại** (`charge.dispute.funds_reinstated`). Chỉ xử lý mỗi `dispute.created` thì sổ
+sách (xem 3.5) sẽ lệch vì không phản ánh các lần tiền ra/vào này.
+
+**Cần có:** Theo dõi đủ vòng đời dispute (`created` → `funds_withdrawn` → `closed` →
+`funds_reinstated`/giữ nguyên) và ghi nhận cả **phí dispute** vào đối soát.
+
 ---
 
 ## 6. Bản đồ vấn đề → gốc rễ
@@ -270,6 +375,12 @@ Mất đơn dù đã trả (3.1, 3.3)  ─────────► Dual-write
 Trạng thái đơn loạn (3.2,2.10)─────────► Thiếu state machine + thiếu khóa khi xử lý
 Lệch Stripe ↔ DB (3.4, 5.3)  ─────────► Thiếu đối soát định kỳ
 Mất tiền do khiếu nại (5.1)   ─────────► Không xử lý dispute/chargeback
+Tiền treo/auth hết hạn (2.11) ─────────► Không xử lý vòng đời capture thủ công
+Đơn kẹt khi PI hủy (2.12)     ─────────► Không xử lý payment_intent.canceled
+Reverse sai khi refund (5.4)  ─────────► Không phân biệt partial vs full refund
+Sổ sách lệch (3.5, 5.5)       ─────────► Đối soát theo gross thay vì net/settled
+Lộ key / phình PCI (4.3,4.4)  ─────────► Quản lý secret lỏng + để PAN chạm backend
+Xem đơn người khác (4.5)      ─────────► Thiếu kiểm tra chủ sở hữu (IDOR)
 ```
 
 ---
