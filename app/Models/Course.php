@@ -6,12 +6,17 @@ use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
+/**
+ * Khóa học (sản phẩm nội dung). Một course có nhiều đợt mở bán (sale_batches)
+ * nối tiếp theo thời gian; giá nằm ở cấp đợt, không ở cấp course. Phần lớn các
+ * accessor dưới đây chỉ phục vụ hiển thị Blade.
+ */
 class Course extends Model
 {
     protected $guarded = [];
 
     protected $casts = [
-        'outcomes' => 'array',
+        'outcomes' => 'array',   // danh sách "học được gì", lưu JSON
     ];
 
     /** Cover gradient palettes — keyed deterministically off the id so the UI is stable. */

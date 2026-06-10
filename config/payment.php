@@ -20,7 +20,15 @@ return [
     | (Konbini/Pay-easy) are held until the Stripe voucher expires.
     */
     'ttl' => [
+        // Mốc giữ chỗ cho thẻ (~15'). Cũng là TTL mặc định lúc vừa reserve khi
+        // CHƯA biết phương thức (Checkout hosted chọn method ở trang Stripe).
+        // Với konbini, đây là "hạn lấy voucher", không phải hạn trả tiền.
         'card_minutes' => env('CHECKOUT_TTL_CARD_MINUTES', 15),
+
+        // Mốc giữ chỗ cho phương thức bất đồng bộ (Konbini/Pay-easy): giữ tới khi
+        // voucher Stripe hết hạn — vài NGÀY. Áp khi đơn chuyển sang `processing`
+        // (extendForAsync). NÊN trùng với `expires_after_days` của konbini bên
+        // StripeGateway (đang kẹp [1,60]) để hold và voucher khớp nhau.
         'async_days' => env('CHECKOUT_TTL_ASYNC_DAYS', 3),
 
         /*

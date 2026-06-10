@@ -6,12 +6,17 @@ use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
+/**
+ * Quyền học (enrollment) — cấp cho user sau khi đơn `paid`. Mặc định vĩnh viễn
+ * (cột access_expires_at để dành cho "truy cập có hạn" tương lai). unique(order_id)
+ * + partial index (user, course) active là chốt chống cấp trùng (NFR-2).
+ */
 class Enrollment extends Model
 {
     protected $guarded = [];
 
-    public const STATUS_ACTIVE = 'active';
-    public const STATUS_REVOKED = 'revoked';
+    public const STATUS_ACTIVE = 'active';     // đang có quyền học
+    public const STATUS_REVOKED = 'revoked';   // bị thu hồi (refund / thua dispute)
 
     protected $casts = [
         'granted_at' => 'datetime',

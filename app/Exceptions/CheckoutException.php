@@ -5,8 +5,12 @@ namespace App\Exceptions;
 use RuntimeException;
 
 /**
- * A business-rule rejection during checkout. The `code` is the internal
- * identifier from spec §9; the message is shown to the buyer via flash.
+ * Lỗi NGHIỆP VỤ khi checkout (không phải lỗi hệ thống). `errorCode` là định danh
+ * nội bộ theo spec §9 (SOLD_OUT / ALREADY_PURCHASED / BATCH_NOT_ON_SALE); message
+ * là câu hiển thị cho người mua qua flash. `httpStatus` gợi ý mã HTTP nếu cần.
+ *
+ * Controller bắt exception này để redirect-back kèm flash (không phải 500).
+ * Dùng các factory tĩnh bên dưới để tạo cho thống nhất.
  */
 class CheckoutException extends RuntimeException
 {

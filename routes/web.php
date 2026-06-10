@@ -13,7 +13,7 @@ use Illuminate\Support\Facades\Route;
 
 /*
 |----------------------------------------------------------------------------
-| Public (buyer-facing, server-rendered Blade — spec §9)
+| Công khai (cho người mua, server-rendered Blade — spec §9)
 |----------------------------------------------------------------------------
 */
 Route::get('/', fn () => redirect()->route('courses.index'));
@@ -36,12 +36,12 @@ Route::post('/logout', [AuthenticatedSessionController::class, 'destroy'])->midd
 
 /*
 |----------------------------------------------------------------------------
-| Buyer actions (require login)
+| Hành động của người mua (yêu cầu đăng nhập)
 |----------------------------------------------------------------------------
 */
 Route::middleware('auth')->group(function () {
     Route::post('/batches/{id}/checkout', [CheckoutController::class, 'store'])
-        ->middleware('throttle:checkout')   // §1.2: stop slot hoarding via repeated checkout
+        ->middleware('throttle:checkout')   // §1.2: chặn ôm chỗ bằng cách checkout liên tục
         ->name('checkout.store');
     Route::get('/orders/{id}', [OrderController::class, 'show'])->name('orders.show');
     Route::post('/orders/{id}/pay', [CheckoutController::class, 'pay'])
@@ -53,14 +53,14 @@ Route::middleware('auth')->group(function () {
 
 /*
 |----------------------------------------------------------------------------
-| Stripe webhook (machine-to-machine — no auth/CSRF, signature-verified §8.1)
+| Webhook Stripe (máy gọi máy — không auth/CSRF, xác thực bằng chữ ký §8.1)
 |----------------------------------------------------------------------------
 */
 Route::post('/webhooks/stripe', StripeWebhookController::class)->name('webhooks.stripe');
 
 /*
 |----------------------------------------------------------------------------
-| Admin (auth + admin role — spec §11)
+| Admin (auth + vai trò admin — spec §11)
 |----------------------------------------------------------------------------
 */
 Route::prefix('admin')->name('admin.')->middleware(['auth', 'admin'])->group(function () {

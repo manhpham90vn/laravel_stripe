@@ -7,12 +7,14 @@ use App\Models\Order;
 use App\Models\Reservation;
 use App\Models\SaleBatch;
 
+/** GET /admin/batches/{batch}/stats — thống kê một đợt: đã bán/đang giữ/còn lại/doanh thu. */
 class StatsController extends Controller
 {
     public function show(SaleBatch $batch)
     {
         $batch->load('course');
 
+        // remaining = capacity - slots_taken; revenue = tổng amount các đơn paid.
         $stats = [
             'capacity' => $batch->capacity,
             'taken' => $batch->slots_taken,

@@ -6,8 +6,12 @@ use App\Models\Order;
 use App\Services\PaymentEventHandler;
 use Illuminate\Http\Request;
 
+/**
+ * Các route đơn hàng phía người mua: xem trạng thái đơn và hủy đơn (spec §9).
+ */
 class OrderController extends Controller
 {
+    /** GET /orders/{id} — trang trạng thái đơn. authorize('view') chặn xem đơn người khác (§11). */
     public function show(Request $request, int $id)
     {
         $order = Order::with('saleBatch.course')->findOrFail($id);
@@ -16,6 +20,11 @@ class OrderController extends Controller
         return view('orders.show', ['order' => $order]);
     }
 
+    /**
+     * POST /orders/{id}/cancel — người mua tự hủy đơn đang chờ. Chỉ chủ đơn được
+     * hủy (policy 'cancel'). Việc hủy thật (đổi trạng thái, nhả chỗ, đóng session)
+     * nằm trong PaymentEventHandler::cancel.
+     */
     public function cancel(Request $request, int $id, PaymentEventHandler $handler)
     {
         $order = Order::findOrFail($id);

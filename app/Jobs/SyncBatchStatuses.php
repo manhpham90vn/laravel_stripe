@@ -8,11 +8,13 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 
 /**
- * Drives the time-based parts of the batch state machine (spec §5.3, BR-9):
- *   scheduled → on_sale   when the sale window opens
- *   on_sale   → closed    when sale_ends_at passes
- * (sold_out is driven by slot counters in ReservationService.)
- * Scheduled every minute.
+ * Lái các phần THEO THỜI GIAN của state machine sale_batch (spec §5.3, BR-9):
+ *   scheduled → on_sale   khi cửa sổ bán mở (tới sale_starts_at)
+ *   on_sale   → closed    khi qua sale_ends_at
+ *
+ * Lưu ý: `sold_out` KHÔNG do job này điều khiển — nó do bộ đếm slot trong
+ * ReservationService lái (theo số lượng). Job này chỉ lo TRỤC THỜI GIAN.
+ * Chạy theo lịch mỗi phút.
  */
 class SyncBatchStatuses implements ShouldQueue
 {
@@ -22,7 +24,7 @@ class SyncBatchStatuses implements ShouldQueue
     {
         $now = now();
 
-        // Open scheduled batches whose window has started.
+        // Mở các batch đã lên lịch mà cửa sổ bán vừa bắt đầu.
         SaleBatch::where('status', SaleBatch::STATUS_SCHEDULED)
             ->where('sale_starts_at', '<=', $now)
             ->where(fn ($q) => $q->whereNull('sale_ends_at')->orWhere('sale_ends_at', '>', $now))
@@ -31,7 +33,7 @@ class SyncBatchStatuses implements ShouldQueue
                 $audit->record($batch, SaleBatch::STATUS_SCHEDULED, SaleBatch::STATUS_ON_SALE, 'system');
             });
 
-        // Close batches past their end time (any non-closed status).
+        // Đóng các batch đã qua giờ kết thúc (mọi status chưa closed).
         SaleBatch::whereIn('status', [SaleBatch::STATUS_SCHEDULED, SaleBatch::STATUS_ON_SALE, SaleBatch::STATUS_SOLD_OUT])
             ->whereNotNull('sale_ends_at')
             ->where('sale_ends_at', '<', $now)

@@ -8,17 +8,25 @@ use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Single entry point for Stripe payment events, shared by the webhook job and
- * the reconciliation safety net so they apply identical logic.
+ * CỬA VÀO DUY NHẤT cho mọi sự kiện thanh toán Stripe — dùng chung bởi job xử lý
+ * webhook (ProcessStripeEvent) và lưới đỡ reconcile, để cả hai áp y hệt logic.
  *
- * Idempotency (BR-5): each event.id is recorded in processed_stripe_events and
- * skipped on replay. The webhook is the source of truth (D5).
+ * Nhiệm vụ: nhận event đã verify chữ ký → map về đúng Order → route sang đúng
+ * method của PaymentEventHandler theo `type`.
+ *
+ * Idempotency (BR-5): mỗi event.id được ghi vào processed_stripe_events và bỏ
+ * qua khi giao lại. Webhook là nguồn sự thật (D5).
  */
 class StripeEventProcessor
 {
     public function __construct(private PaymentEventHandler $handler) {}
 
-    /** @param array{id:string,type:string,data:array} $event */
+    /**
+     * Xử lý một event Stripe: kiểm event.id → pre-check dedup → map về Order →
+     * match(type) gọi handler tương ứng.
+     *
+     * @param array{id:string,type:string,data:array} $event
+     */
     public function process(array $event): void
     {
         $eventId = $event['id'] ?? null;
@@ -31,19 +39,21 @@ class StripeEventProcessor
         }
 
         if (ProcessedStripeEvent::find($eventId)) {
-            return; // already handled — cheap pre-check before doing any work
+            return; // đã xử lý rồi — pre-check rẻ trước khi làm bất cứ việc gì
         }
 
         $object = $event['data']['object'] ?? [];
         $order = $this->resolveOrder($object);
 
-        // The processed-event marker is the authoritative dedup: each handler
-        // writes it FIRST, in the same transaction as its side-effect (§2.8), so
-        // a concurrent duplicate trips the unique violation and is dropped there.
-        // `ctx` carries the event id/type into that transaction.
+        // Dấu processed-event mới là chốt dedup THẬT: mỗi handler ghi dấu TRƯỚC,
+        // trong cùng transaction với side-effect (§2.8), nên nếu có bản trùng chạy
+        // song song thì nó đụng unique violation và bị loại ở đó. `ctx` mang
+        // event id/type vào trong transaction ấy.
         $ctx = ['event_id' => $eventId, 'event_type' => $type];
 
         if (! $order) {
+            // Event không map được về đơn nào (vd event không liên quan) → chỉ
+            // ghi dấu để lần retry bỏ qua, không làm gì thêm.
             Log::warning('Stripe event with no matching order', ['type' => $type, 'event' => $eventId]);
             $this->markProcessed($eventId, $type);
 
@@ -80,7 +90,7 @@ class StripeEventProcessor
                 'dispute_id' => $object['id'] ?? null,
                 'dispute_status' => $object['status'] ?? null,
             ]),
-            // Nothing to apply, but still record it so retries skip the work.
+            // Event ta không quan tâm — vẫn ghi dấu để retry bỏ qua.
             default => $this->onUnhandled($eventId, $type),
         };
     }
@@ -92,9 +102,9 @@ class StripeEventProcessor
     }
 
     /**
-     * Record the marker for events with no order-level side-effect (no match /
-     * no order). For events that DO mutate an order the handler writes the marker
-     * inside the side-effect transaction instead, so the two stay atomic.
+     * Ghi dấu cho các event KHÔNG đụng tới đơn (không map được / event lạ). Với
+     * event CÓ thay đổi đơn thì chính handler ghi dấu BÊN TRONG transaction
+     * side-effect, để dấu và thay đổi luôn nguyên tử cùng nhau.
      */
     private function markProcessed(string $eventId, string $type): void
     {
@@ -109,14 +119,22 @@ class StripeEventProcessor
         }
     }
 
-    /** Map an event object back to our order via metadata, PI, or charge (spec §8.1). */
+    /**
+     * Map object trong event về Order của ta (spec §8.1), thử lần lượt theo độ
+     * tin cậy giảm dần:
+     *   1. metadata.order_id (ta tự gắn lúc tạo PI — đáng tin nhất).
+     *   2. payment_intent id (dispute/charge mang theo PI; event payment_intent.*
+     *      thì chính nó là PI).
+     *   3. charge id.
+     *   4. object id (khi object chính là PaymentIntent).
+     */
     private function resolveOrder(array $object): ?Order
     {
         if ($orderId = $object['metadata']['order_id'] ?? null) {
             return Order::find($orderId);
         }
 
-        // Disputes/charges carry the PI; payment_intent.* events are the PI itself.
+        // Dispute/charge mang theo PI; event payment_intent.* thì object là PI.
         if ($pi = $object['payment_intent'] ?? null) {
             if ($order = Order::where('stripe_payment_intent_id', $pi)->first()) {
                 return $order;

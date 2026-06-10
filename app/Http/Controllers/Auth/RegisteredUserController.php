@@ -10,13 +10,16 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\Rules\Password;
 
+/** Đăng ký tài khoản mới (auth cơ bản kiểu Breeze). Mặc định role = 'user'. */
 class RegisteredUserController extends Controller
 {
+    /** GET /register — form đăng ký. */
     public function create()
     {
         return view('auth.register');
     }
 
+    /** POST /register — tạo user (role 'user'), hash mật khẩu, đăng nhập luôn. */
     public function store(Request $request)
     {
         $data = $request->validate([

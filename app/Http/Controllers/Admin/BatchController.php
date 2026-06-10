@@ -9,8 +9,10 @@ use App\Services\AuditLogger;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 
+/** Admin quản lý các ĐỢT BÁN (sale_batches) của một course: liệt kê / tạo / sửa. */
 class BatchController extends Controller
 {
+    /** GET /admin/courses/{course}/batches — danh sách đợt của course (mới nhất trước). */
     public function index(Course $course)
     {
         $course->load(['batches' => fn ($q) => $q->latest()]);
@@ -18,6 +20,7 @@ class BatchController extends Controller
         return view('admin.batches.index', ['course' => $course]);
     }
 
+    /** POST — tạo đợt mới: slots_taken khởi tạo 0, tiền JPY. */
     public function store(Request $request, Course $course)
     {
         $data = $this->validated($request);
@@ -32,6 +35,7 @@ class BatchController extends Controller
             ->with('status', 'Đã tạo đợt mở bán.');
     }
 
+    /** PATCH — sửa/đóng đợt. Nếu status đổi thì ghi audit (actor = admin). */
     public function update(Request $request, SaleBatch $batch, AuditLogger $audit)
     {
         $data = $this->validated($request);
@@ -47,6 +51,7 @@ class BatchController extends Controller
             ->with('status', 'Đã cập nhật đợt.');
     }
 
+    /** Validate dữ liệu form đợt bán. */
     private function validated(Request $request): array
     {
         return $request->validate([

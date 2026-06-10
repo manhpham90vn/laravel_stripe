@@ -7,19 +7,25 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
+/**
+ * Đơn hàng — một giao dịch gắn (1 đợt bán + 1 user), ánh xạ tới 1 PaymentIntent
+ * của Stripe. State machine ở spec §5.1, thực thi bởi PaymentEventHandler.
+ * `amount` là snapshot giá lúc checkout (BR-3, không đổi khi admin sửa giá sau).
+ */
 class Order extends Model
 {
     protected $guarded = [];
 
-    public const STATUS_PENDING = 'pending';
-    public const STATUS_PROCESSING = 'processing';
-    public const STATUS_PAID = 'paid';
-    public const STATUS_FAILED = 'failed';
-    public const STATUS_CANCELED = 'canceled';
-    public const STATUS_REFUNDED = 'refunded';
-    public const STATUS_DISPUTED = 'disputed';
+    // Các trạng thái đơn (spec §5.1).
+    public const STATUS_PENDING = 'pending';        // vừa tạo, chờ trả (đồng bộ)
+    public const STATUS_PROCESSING = 'processing';  // async — đã đặt voucher, chờ tiền
+    public const STATUS_PAID = 'paid';              // tiền đã về, đã cấp enrollment
+    public const STATUS_FAILED = 'failed';          // thanh toán thất bại
+    public const STATUS_CANCELED = 'canceled';      // hủy / hết hạn chưa trả
+    public const STATUS_REFUNDED = 'refunded';      // đã hoàn tiền
+    public const STATUS_DISPUTED = 'disputed';      // đang khiếu nại (chargeback)
 
-    /** Statuses that hold a live claim on a slot (BR-2). */
+    /** Các trạng thái đang GIỮ chỗ thật sự (BR-2) — dùng để check 1-đơn-live/đợt. */
     public const LIVE_STATUSES = [self::STATUS_PENDING, self::STATUS_PROCESSING, self::STATUS_PAID];
 
     protected $casts = [

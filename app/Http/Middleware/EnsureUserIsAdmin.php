@@ -6,11 +6,12 @@ use Closure;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 
-/** Buyer (or guest) hitting /admin/* → 403 (spec §11). */
+/** Chặn buyer/guest truy cập /admin/* → trả 403 (spec §11). Gắn dưới alias 'admin'. */
 class EnsureUserIsAdmin
 {
     public function handle(Request $request, Closure $next): Response
     {
+        // Không đăng nhập (?->) hoặc không phải admin → 403.
         abort_unless($request->user()?->isAdmin(), 403);
 
         return $next($request);

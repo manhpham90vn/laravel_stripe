@@ -7,6 +7,7 @@ use App\Models\Course;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
+/** Admin quản lý COURSE: liệt kê / tạo / sửa (CRUD thường, không đụng tiền). */
 class CourseController extends Controller
 {
     public function index()
@@ -56,10 +57,11 @@ class CourseController extends Controller
             'status' => ['required', 'in:draft,published,archived'],
         ]);
 
+        // Không nhập slug → tự sinh từ title.
         $data['slug'] = ($data['slug'] ?? null) ?: Str::slug($data['title']);
         $data['lessons_count'] = $data['lessons_count'] ?? 0;
 
-        // Outcomes textarea → array (one per line).
+        // Textarea outcomes → mảng (mỗi dòng một mục).
         $data['outcomes'] = collect(explode("\n", (string) ($data['outcomes'] ?? '')))
             ->map(fn ($l) => trim($l))
             ->filter()

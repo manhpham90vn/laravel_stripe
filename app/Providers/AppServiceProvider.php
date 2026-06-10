@@ -12,7 +12,9 @@ use Illuminate\Support\ServiceProvider;
 class AppServiceProvider extends ServiceProvider
 {
     /**
-     * Register any application services.
+     * Đăng ký service. Bind interface PaymentGateway → StripeGateway (singleton),
+     * tiêm secret/webhook-secret từ config. Nhờ bind ở một chỗ này mà toàn bộ
+     * code chỉ phụ thuộc interface và dễ mock trong test.
      */
     public function register(): void
     {
@@ -23,13 +25,14 @@ class AppServiceProvider extends ServiceProvider
     }
 
     /**
-     * Bootstrap any application services.
+     * Khởi động service. Định nghĩa rate limiter 'checkout' (gắn ở route
+     * /checkout và /orders/{id}/pay).
      */
     public function boot(): void
     {
-        // Throttle checkout so a single user can't spam "Mua" and hoard slots
-        // (payment_solutions §1.2 review #7). Keyed per authenticated user,
-        // falling back to IP for safety.
+        // Giới hạn tần suất checkout để 1 user không spam "Mua" ôm chỗ
+        // (payment_solutions §1.2 review #7). Khóa theo user đăng nhập, không có
+        // thì fallback theo IP cho an toàn.
         RateLimiter::for('checkout', fn (Request $request) => Limit::perMinute(
             (int) config('payment.rate_limit.checkout_per_minute')
         )->by($request->user()?->id ?: $request->ip()));

@@ -11,6 +11,10 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 
+/**
+ * Tài khoản người dùng. Hai vai trò (spec §11): 'user' (học viên/buyer) và
+ * 'admin' (người bán). Phân quyền dựa vào cột `role` + trạng thái đăng nhập.
+ */
 #[Fillable(['name', 'email', 'password', 'role'])]
 #[Hidden(['password', 'remember_token'])]
 class User extends Authenticatable
@@ -21,6 +25,7 @@ class User extends Authenticatable
     public const ROLE_USER = 'user';
     public const ROLE_ADMIN = 'admin';
 
+    /** Có phải admin không (dùng bởi middleware 'admin' và OrderPolicy). */
     public function isAdmin(): bool
     {
         return $this->role === self::ROLE_ADMIN;

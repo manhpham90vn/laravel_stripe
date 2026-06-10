@@ -10,13 +10,14 @@ use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Safety net for missed/late webhooks (jobs_and_scheduler §5): reconciles
- * still-live orders against Stripe so DB ↔ Stripe state converges within ~15
- * minutes even if a webhook is lost. Idempotent — it reuses the same
- * PaymentEventHandler the webhook does (NFR-2).
+ * LƯỚI ĐỠ cho webhook bị mất/đến trễ (jobs_and_scheduler §5): đối chiếu các đơn
+ * còn "sống" với Stripe để trạng thái DB ↔ Stripe hội tụ trong ~15 phút kể cả
+ * khi webhook thất lạc. Idempotent — dùng lại CHÍNH PaymentEventHandler mà webhook
+ * dùng (NFR-2), nên không gây tác dụng phụ kép.
  *
- * The shallow run (every 15 min) scans recent live orders; the deep run (daily)
- * sweeps all of them.
+ * Hai chế độ chạy:
+ *   - shallow (mỗi 15'): chỉ quét đơn live gần đây (giới hạn 200, trong 30 ngày).
+ *   - deep (hằng ngày): quét TẤT CẢ, gồm cả đơn đã chết (canceled/failed).
  */
 class ReconcileStripeOrders implements ShouldQueue
 {
@@ -28,9 +29,9 @@ class ReconcileStripeOrders implements ShouldQueue
     {
         $minutes = (int) config('payment.reconcile.stuck_after_minutes', 30);
 
-        // Live orders always; the deep run also sweeps dead orders (§8.2a) so a
-        // `succeeded` that landed after the slot was freed still gets reclaimed
-        // or refunded even when its webhook was lost.
+        // Luôn quét đơn live; bản DEEP quét THÊM đơn đã chết (§8.2a) để một
+        // `succeeded` về sau khi chỗ đã nhả vẫn được reclaim hoặc refund kể cả
+        // khi webhook của nó bị mất. (Đây là yêu cầu bắt buộc của §8.2a #4.)
         $statuses = $this->deep
             ? [Order::STATUS_PENDING, Order::STATUS_PROCESSING, Order::STATUS_CANCELED, Order::STATUS_FAILED]
             : [Order::STATUS_PENDING, Order::STATUS_PROCESSING];
@@ -38,9 +39,11 @@ class ReconcileStripeOrders implements ShouldQueue
         $query = Order::query()
             ->whereIn('status', $statuses)
             ->whereNotNull('stripe_payment_intent_id')
+            // Chỉ đụng đơn đủ "cũ" để không can thiệp checkout đang diễn ra.
             ->where('created_at', '<', now()->subMinutes($minutes))
             ->orderBy('id');
 
+        // Deep dùng lazy() để stream khỏi tốn RAM; shallow giới hạn 200/lần.
         $orders = $this->deep
             ? $query->lazy()
             : $query->where('created_at', '>', now()->subDays(30))->limit(200)->get();
@@ -63,11 +66,11 @@ class ReconcileStripeOrders implements ShouldQueue
         }
 
         if (! $pi) {
-            return; // no PaymentIntent yet — the TTL job cancels it if abandoned
+            return; // chưa có PaymentIntent — job TTL sẽ hủy nếu bị bỏ rơi
         }
 
-        // B. Money check (AC-9): the amount/currency must match the snapshot.
-        // amount_received is the settled figure for a succeeded PI (BR-11).
+        // B. Đối chiếu tiền (AC-9): amount/currency phải khớp snapshot.
+        // amount_received là số đã chốt của một PI succeeded (BR-11).
         $stripeAmount = $pi['amount_received'] ?? ($pi['amount'] ?? null);
         if ($stripeAmount !== null && (int) $stripeAmount !== (int) $order->amount) {
             Log::warning('Reconcile: amount mismatch', [
@@ -75,7 +78,7 @@ class ReconcileStripeOrders implements ShouldQueue
             ]);
         }
 
-        // A. Converge the order status from the PaymentIntent.
+        // A. Hội tụ trạng thái đơn theo trạng thái PaymentIntent.
         match ($pi['status'] ?? null) {
             'succeeded' => $handler->markPaid($order, [
                 'payment_method_type' => $pi['payment_method_type'] ?? $order->payment_method_type,
@@ -84,7 +87,7 @@ class ReconcileStripeOrders implements ShouldQueue
                 'amount' => $stripeAmount,
             ]),
             'canceled' => $handler->markFailed($order, ['reason' => 'reconcile: PaymentIntent canceled']),
-            default => null, // processing/requires_* → leave; TTL job handles expiry
+            default => null, // processing/requires_* → để yên; job TTL lo việc hết hạn
         };
     }
 }

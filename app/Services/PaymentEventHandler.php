@@ -12,17 +12,27 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Applies payment outcomes to an order. Every method is idempotent and
- * transactional — safe to call again on a webhook retry (BR-5/NFR-2).
- * These transitions are the ONLY way an order leaves `pending` (spec §5.1).
+ * Bộ xử lý áp KẾT QUẢ THANH TOÁN lên đơn hàng — trái tim của luồng tiền.
+ *
+ * Mọi method ở đây đều IDEMPOTENT và chạy trong TRANSACTION → an toàn khi bị gọi
+ * lại do webhook retry hoặc do job reconcile chạy trùng (BR-5 / NFR-2).
+ *
+ * Đây là CON ĐƯỜNG DUY NHẤT để một đơn rời khỏi `pending` (spec §5.1): controller
+ * chỉ tạo đơn `pending` và hủy chủ động; còn lại paid/processing/failed/refunded/
+ * disputed đều do các method dưới đây thực hiện, hầu hết kích hoạt từ webhook
+ * (nguồn sự thật — D5).
  */
 class PaymentEventHandler
 {
     /**
-     * The single source of truth for legal order status transitions (spec §5.1).
-     * Anything not listed here is rejected by transition(), so impossible jumps
-     * like `canceled → paid` or refunding a `pending` order are blocked at the
-     * root instead of relying on per-method guards.
+     * Bảng chuyển trạng thái HỢP LỆ duy nhất (spec §5.1). Bất kỳ bước nhảy nào
+     * không có trong bảng đều bị transition() từ chối — nên các bước vô lý như
+     * `canceled → paid` tùy tiện hay refund một đơn `pending` bị chặn TẬN GỐC,
+     * không phải dựa vào guard rải rác ở từng method.
+     *
+     * Đọc: từ-khóa (status hiện tại) → [các status được phép nhảy tới].
+     * Lưu ý 2 cạnh "phục hồi" đặc biệt: failed/canceled → paid|refunded chỉ dùng
+     * cho reclaim-or-refund khi `succeeded` về muộn (§8.2a), không phải nhảy tùy ý.
      */
     private const ALLOWED = [
         Order::STATUS_PENDING => [Order::STATUS_PROCESSING, Order::STATUS_PAID, Order::STATUS_FAILED, Order::STATUS_CANCELED],
@@ -45,16 +55,21 @@ class PaymentEventHandler
     ) {}
 
     /**
-     * Run $work inside one transaction that ALSO writes the processed-event
-     * marker first (payment_solutions §2.8): dedup and side-effect commit or
-     * roll back as a unit, so we never "marked but didn't act", and a lost job
-     * that rolls back is safely retried by Stripe. A genuine duplicate trips the
-     * primary-key unique violation and is swallowed (already handled); a
-     * deadlock / lost connection is rethrown so the queue retries it.
+     * Chạy $work trong MỘT transaction, và ghi luôn "dấu đã xử lý event" (bảng
+     * processed_stripe_events) NGAY ĐẦU transaction đó (payment_solutions §2.8).
      *
-     * $eventId is null when the caller is not a webhook (reconcile / TTL job):
-     * then there is no marker to write — $work just runs in its own transaction,
-     * relying on the per-order idempotency already baked into each handler.
+     * Mục đích: dedup và side-effect commit/rollback NHƯ MỘT KHỐI — không bao giờ
+     * rơi vào cảnh "đã đánh dấu xử lý nhưng chưa làm gì" (hoặc ngược lại). Nếu job
+     * lỗi và rollback thì dấu cũng mất theo → Stripe retry lại an toàn.
+     *
+     * Phân biệt 2 loại lỗi QueryException:
+     *  - Trùng dấu (unique violation trên event_id) = event giao trùng → NUỐT êm
+     *    (cái đầu tiên đã xử lý rồi).
+     *  - Deadlock / mất kết nối → NÉM LẠI để queue retry.
+     *
+     * $eventId = null khi NGƯỜI GỌI KHÔNG PHẢI webhook (job reconcile / TTL): khi
+     * đó không có dấu để ghi — $work chỉ chạy trong transaction của nó, dựa vào
+     * tính idempotent theo từng đơn đã cài sẵn trong mỗi handler.
      */
     private function applyEvent(?string $eventId, ?string $eventType, Closure $work): void
     {
@@ -92,11 +107,15 @@ class PaymentEventHandler
     }
 
     /**
-     * Move an order to $to if the jump is legal, persisting $attributes and the
-     * audit trail in one go. Returns whether the transition happened, so callers
-     * gate their side effects on it. Illegal jumps are logged and swallowed (not
-     * thrown) so the webhook still ACKs (BR-5); same-status replays are the
-     * expected idempotent no-op and stay silent.
+     * Chuyển đơn sang trạng thái $to NẾU bước nhảy hợp lệ (theo bảng ALLOWED),
+     * đồng thời lưu $attributes và ghi audit log trong cùng một lần.
+     *
+     * Trả về true/false cho biết bước nhảy CÓ xảy ra không, để caller quyết định
+     * chạy side-effect (cấp enrollment, nhả slot…) hay không.
+     *
+     * Bước nhảy phạm luật → ghi log cảnh báo rồi NUỐT (không ném) để webhook vẫn
+     * trả 200 cho Stripe (BR-5). Riêng nhảy "cùng status" là no-op idempotent đã
+     * lường trước → im lặng, không log.
      */
     private function transition(
         Order $order,
@@ -125,28 +144,36 @@ class PaymentEventHandler
     }
 
     /**
-     * payment_intent.succeeded → paid + enrollment (spec §8.2).
+     * payment_intent.succeeded → đơn `paid` + cấp enrollment (spec §8.2).
      *
-     * Normal path (pending/processing): the slot is still held, so just consume
-     * it and grant access. Recovery path (canceled/failed): the slot was already
-     * released, so reclaim-or-refund (§8.2a) — try to grab a seat back; if none
-     * is free, refund the late charge. The Stripe refund call is deferred until
-     * after the transaction commits so we never hold row locks across a network
-     * call.
+     * Có HAI ĐƯỜNG tùy trạng thái đơn lúc tiền về:
+     *
+     *  • ĐƯỜNG THƯỜNG (đơn còn pending/processing): chỗ vẫn đang được giữ → chỉ
+     *    cần consume reservation + cấp quyền học.
+     *
+     *  • ĐƯỜNG PHỤC HỒI (đơn đã canceled/failed — chỗ đã nhả): tiền về MUỘN
+     *    (§8.2a reclaim-or-refund). Thử GIÀNH LẠI chỗ: còn chỗ → lên paid + cấp
+     *    quyền; hết chỗ → REFUND khoản vừa thu. Đây là 2 cạnh duy nhất kéo đơn
+     *    chết quay lại sống (xem bảng ALLOWED).
+     *
+     * Lệnh refund Stripe được HOÃN tới SAU khi transaction commit (biến
+     * $refundOrderId) để không giữ row lock trong lúc gọi mạng.
      */
     public function markPaid(Order $order, array $meta = []): void
     {
         $refundOrderId = null;
 
         $this->applyEvent($meta['event_id'] ?? null, $meta['event_type'] ?? null, function () use ($order, $meta, &$refundOrderId) {
+            // Khóa dòng đơn để serialize với các webhook/job chạy song song.
             $order = Order::whereKey($order->id)->lockForUpdate()->with('reservation')->firstOrFail();
 
             if ($order->status === Order::STATUS_PAID) {
-                return; // idempotent — already settled
+                return; // idempotent — đơn đã paid rồi, không làm gì thêm
             }
 
-            // BR-11 / §2.9: never grant on an amount that doesn't match the
-            // server-side snapshot. Hold for ops rather than silently enrolling.
+            // BR-11 / §2.9: TUYỆT ĐỐI không cấp quyền nếu số tiền Stripe báo về
+            // khác snapshot `orders.amount` (server-side). Giữ nguyên trạng thái
+            // + log cảnh báo cho ops xử lý tay, thà chặn còn hơn cấp nhầm.
             if (isset($meta['amount']) && (int) $meta['amount'] !== (int) $order->amount) {
                 Log::warning('Amount mismatch on succeeded payment — not granting', [
                     'order_id' => $order->id, 'db' => $order->amount, 'stripe' => $meta['amount'],
@@ -164,7 +191,7 @@ class PaymentEventHandler
                 'stripe_payment_intent_id' => $meta['payment_intent_id'] ?? $order->stripe_payment_intent_id,
             ];
 
-            // Normal path — the hold is still in place.
+            // ĐƯỜNG THƯỜNG — chỗ vẫn đang giữ: consume reservation + cấp quyền.
             if (in_array($order->status, [Order::STATUS_PENDING, Order::STATUS_PROCESSING], true)) {
                 if (! $this->transition($order, Order::STATUS_PAID, $paidAttributes, 'webhook', null, $meta)) {
                     return;
@@ -180,7 +207,7 @@ class PaymentEventHandler
                 return;
             }
 
-            // Recovery path (§8.2a) — slot already released; reclaim or refund.
+            // ĐƯỜNG PHỤC HỒI (§8.2a) — chỗ đã nhả: thử giành lại, không thì refund.
             if (in_array($order->status, [Order::STATUS_CANCELED, Order::STATUS_FAILED], true)) {
                 if ($this->reservations->reclaim($order)) {
                     if ($this->transition($order, Order::STATUS_PAID, $paidAttributes, 'webhook', null, $meta + ['recovery' => 'reclaimed'])) {
@@ -191,8 +218,8 @@ class PaymentEventHandler
                     return;
                 }
 
-                // No seat available — persist the charge ref and refund it after
-                // commit; the charge.refunded webhook converges order → refunded.
+                // Hết chỗ — lưu lại charge ref rồi refund SAU commit; webhook
+                // charge.refunded sẽ đưa đơn về `refunded` sau đó.
                 $order->update([
                     'stripe_charge_id' => $meta['charge_id'] ?? $order->stripe_charge_id,
                     'stripe_payment_intent_id' => $meta['payment_intent_id'] ?? $order->stripe_payment_intent_id,
@@ -217,9 +244,12 @@ class PaymentEventHandler
     }
 
     /**
-     * checkout.session.completed → capture the real PaymentIntent id and, when
-     * the session finished without being paid (async voucher placed), move the
-     * order to processing so the slot is held to voucher expiry (spec §8.2).
+     * checkout.session.completed → chốt lại id PaymentIntent THẬT, và nếu phiên
+     * kết thúc mà CHƯA trả tiền (tức là đã đặt voucher async), đẩy đơn sang
+     * `processing` để giữ chỗ tới hạn voucher (spec §8.2).
+     *
+     * Trường hợp trả NGAY (card) đến qua payment_intent.succeeded, không xử lý ở
+     * đây — đây chỉ lo ca async (payment_status != 'paid').
      */
     public function onCheckoutCompleted(Order $order, array $meta = []): void
     {
@@ -240,7 +270,11 @@ class PaymentEventHandler
         });
     }
 
-    /** payment_intent.processing → async voucher placed, slot held (spec §7.2). */
+    /**
+     * payment_intent.processing → voucher async đã đặt, đơn sang `processing`
+     * và giữ chỗ tới hạn voucher (spec §7.2). Gọi extendForAsync() để đẩy
+     * `reserved_until` từ 15' ra vài ngày — xem giải thích timeline ở hàm đó.
+     */
     public function markProcessing(Order $order, array $meta = []): void
     {
         $this->applyEvent($meta['event_id'] ?? null, $meta['event_type'] ?? null, function () use ($order, $meta) {
@@ -258,7 +292,11 @@ class PaymentEventHandler
         });
     }
 
-    /** payment_intent.payment_failed → fail + release the slot. */
+    /**
+     * payment_intent.payment_failed / .canceled → đơn `failed` + nhả chỗ.
+     * Lưu ý: paid → failed bị bảng ALLOWED chặn (thất bại đến muộn sau khi đã
+     * thành công không được lật ngược); replay failed/canceled cũng là no-op.
+     */
     public function markFailed(Order $order, array $meta = []): void
     {
         $this->applyEvent($meta['event_id'] ?? null, $meta['event_type'] ?? null, function () use ($order, $meta) {
@@ -276,13 +314,13 @@ class PaymentEventHandler
         });
     }
 
-    /** Buyer-initiated cancel of a pending order (spec §9). */
+    /** Người mua tự bấm hủy đơn đang chờ (spec §9). Actor = 'user'. */
     public function cancel(Order $order, int $actorId): void
     {
         $this->cancelOrder($order, 'user', $actorId);
     }
 
-    /** TTL elapsed — system cancels the order and frees the slot (spec §7.3, job). */
+    /** Hết TTL — hệ thống (job) tự hủy đơn và nhả chỗ (spec §7.3). Actor = 'system'. */
     public function expire(Order $order): void
     {
         $this->cancelOrder($order, 'system', null);
@@ -314,7 +352,11 @@ class PaymentEventHandler
         }
     }
 
-    /** charge.refunded → refunded + revoke enrollment (BR-7; slot NOT auto-freed). */
+    /**
+     * charge.refunded → đơn `refunded` + thu hồi enrollment (BR-7).
+     * CHÍNH SÁCH: KHÔNG tự nhả chỗ cho người khác (tránh dao động số liệu/đối
+     * soát) — admin tự quyết mở thêm chỗ nếu muốn.
+     */
     public function markRefunded(Order $order, array $meta = []): void
     {
         $this->applyEvent($meta['event_id'] ?? null, $meta['event_type'] ?? null, function () use ($order, $meta) {
@@ -328,7 +370,7 @@ class PaymentEventHandler
         });
     }
 
-    /** charge.dispute.created → funds held, outcome pending (spec §5.1, §8.2). */
+    /** charge.dispute.created → đơn `disputed`, tiền bị Stripe giữ, chờ kết quả (§5.1, §8.2). */
     public function openDispute(Order $order, array $meta = []): void
     {
         $this->applyEvent($meta['event_id'] ?? null, $meta['event_type'] ?? null, function () use ($order, $meta) {
@@ -339,9 +381,9 @@ class PaymentEventHandler
     }
 
     /**
-     * charge.dispute.closed → resolve by outcome (spec §5.1):
-     *   won / warning_closed → merchant kept funds → back to paid (access stays)
-     *   lost (or other)      → customer won → treat as refunded, revoke access
+     * charge.dispute.closed → xử theo kết quả (spec §5.1):
+     *   won / warning_closed → bên bán giữ được tiền → quay lại `paid` (giữ quyền học)
+     *   lost (hoặc khác)     → khách thắng → coi như `refunded`, thu hồi quyền học
      */
     public function closeDispute(Order $order, array $meta = []): void
     {

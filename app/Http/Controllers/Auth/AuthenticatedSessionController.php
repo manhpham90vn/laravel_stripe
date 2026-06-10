@@ -7,13 +7,16 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\ValidationException;
 
+/** Đăng nhập / đăng xuất (auth cơ bản kiểu Breeze). */
 class AuthenticatedSessionController extends Controller
 {
+    /** GET /login — form đăng nhập. */
     public function create()
     {
         return view('auth.login');
     }
 
+    /** POST /login — xác thực; sai thì ném ValidationException, đúng thì regenerate session. */
     public function store(Request $request)
     {
         $credentials = $request->validate([

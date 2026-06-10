@@ -14,17 +14,20 @@ Artisan::command('inspire', function () {
 
 /*
 |----------------------------------------------------------------------------
-| Scheduled background work (spec D8 / jobs_and_scheduler.md)
+| Tác vụ nền theo lịch (spec D8 / jobs_and_scheduler.md)
 |----------------------------------------------------------------------------
-| Run the scheduler with: php artisan schedule:work
-| Process the queue with:  php artisan queue:work
+| Chạy scheduler: php artisan schedule:work
+| Chạy queue:     php artisan queue:work
+| `withoutOverlapping()` để một job không chồng lên lần chạy trước.
 */
+// Mỗi phút: nhả chỗ hết TTL, và sync trạng thái đợt theo thời gian.
 Schedule::job(new ReleaseExpiredReservations)->everyMinute()->withoutOverlapping();
 Schedule::job(new SyncBatchStatuses)->everyMinute()->withoutOverlapping();
 
-// Safety net for missed/late Stripe webhooks (jobs_and_scheduler §5).
+// Lưới đỡ cho webhook Stripe bị mất/đến trễ (jobs_and_scheduler §5).
+// shallow mỗi 15' (đơn live gần đây); deep hằng ngày (quét cả đơn đã chết).
 Schedule::job(new ReconcileStripeOrders)->everyFifteenMinutes()->withoutOverlapping();
 Schedule::job(new ReconcileStripeOrders(deep: true))->dailyAt('03:00')->withoutOverlapping();
 
-// Prune old webhook idempotency markers (payment_solutions §2.8 review #8).
+// Dọn dấu idempotency webhook cũ (payment_solutions §2.8 review #8).
 Schedule::job(new PruneProcessedStripeEvents)->dailyAt('04:00')->withoutOverlapping();

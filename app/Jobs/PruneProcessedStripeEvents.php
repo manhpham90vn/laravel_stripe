@@ -8,10 +8,10 @@ use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Housekeeping for processed_stripe_events (payment_solutions §2.8 review #8):
- * the idempotency markers grow without bound. Stripe stops retrying an event
- * after a few days, so markers older than the retention window can be deleted
- * without ever re-processing a duplicate. Scheduled daily.
+ * Dọn dẹp bảng processed_stripe_events (payment_solutions §2.8 review #8): các
+ * "dấu đã xử lý" (idempotency marker) cứ tăng mãi không giới hạn. Vì Stripe ngừng
+ * retry một event sau vài ngày, nên dấu cũ hơn cửa sổ giữ (retention_days) có thể
+ * XÓA mà không bao giờ làm xử lý lại bản trùng. Chạy theo lịch hằng ngày.
  */
 class PruneProcessedStripeEvents implements ShouldQueue
 {
@@ -19,6 +19,7 @@ class PruneProcessedStripeEvents implements ShouldQueue
 
     public function handle(): void
     {
+        // Tối thiểu giữ 1 ngày để không bao giờ xóa dấu vừa ghi.
         $days = max(1, (int) config('payment.processed_events.retention_days'));
 
         $deleted = ProcessedStripeEvent::where('processed_at', '<', now()->subDays($days))->delete();

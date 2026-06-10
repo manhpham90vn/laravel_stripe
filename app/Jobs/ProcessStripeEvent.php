@@ -7,10 +7,11 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 
 /**
- * Processes a verified Stripe event off the request path (jobs_and_scheduler
- * §4): the webhook controller verifies the signature, returns 200 fast, and
- * dispatches this job. Retries on transient failures; the processor itself is
- * idempotent (BR-5), so replays never double-grant or double-release.
+ * Xử lý một event Stripe đã verify, NGOÀI luồng request (jobs_and_scheduler §4):
+ * controller webhook verify chữ ký, trả 200 thật nhanh rồi dispatch job này.
+ *
+ * Job retry khi lỗi tạm thời; bản thân processor là idempotent (BR-5) nên chạy
+ * lại không bao giờ cấp quyền / nhả chỗ hai lần.
  */
 class ProcessStripeEvent implements ShouldQueue
 {
@@ -18,7 +19,7 @@ class ProcessStripeEvent implements ShouldQueue
 
     public int $tries = 5;
 
-    /** @var array<int,int> backoff between retries (seconds). */
+    /** @var array<int,int> thời gian chờ giữa các lần retry (giây). */
     public array $backoff = [10, 30, 60, 120];
 
     /** @param array{id:string,type:string,data:array} $event */
