@@ -18,6 +18,20 @@ use Illuminate\Support\Facades\DB;
  * thứ khiến KHÔNG THỂ bán vượt số lượng dù nhiều người bấm mua cùng lúc — row
  * lock tuần tự hóa họ lại (NFR-1 / BR-1). Không bao giờ đọc slots_taken ngoài
  * transaction để "quyết định bán".
+ *
+ * THỨ TỰ KHÓA (chống deadlock) — quan trọng khi đọc cùng PaymentEventHandler:
+ * mọi transaction trong cả hai lớp đều acquire lock theo CÙNG MỘT THỨ TỰ
+ *
+ *     Order  →  SaleBatch  →  Reservation
+ *
+ * (lấy dòng nào trước thì luôn theo trật tự này, không bao giờ ngược lại). Cụ thể:
+ *   - reserve():  chỉ khóa SaleBatch (rồi INSERT reservation + order — dòng mới).
+ *   - release():  khóa SaleBatch → Reservation.
+ *   - reclaim():  khóa SaleBatch (order đã bị markPaid khóa từ trước trong cùng txn).
+ *   - PaymentEventHandler::markPaid/markFailed/cancelOrder: khóa Order TRƯỚC, rồi
+ *     mới gọi xuống đây để khóa SaleBatch (→ Reservation).
+ * Vì không có đường nào lấy SaleBatch trước rồi mới đòi Order, hai transaction
+ * không thể ôm chéo khóa của nhau → không có chu trình chờ → không deadlock.
  */
 class ReservationService
 {

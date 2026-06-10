@@ -24,6 +24,11 @@ class OrderController extends Controller
      * POST /orders/{id}/cancel — người mua tự hủy đơn đang chờ. Chỉ chủ đơn được
      * hủy (policy 'cancel'). Việc hủy thật (đổi trạng thái, nhả chỗ, đóng session)
      * nằm trong PaymentEventHandler::cancel.
+     *
+     * KHÔNG cần guard status ở đây: nếu đơn đã `paid`/`refunded`/`canceled` (vd
+     * người mua bấm Hủy sau khi webhook vừa lên paid), handler gọi transition()
+     * và bảng ALLOWED LẶNG LẼ TỪ CHỐI bước nhảy → no-op an toàn, không nhả chỗ
+     * của một đơn đã trả. Đây là lý do controller chỉ cần check quyền sở hữu.
      */
     public function cancel(Request $request, int $id, PaymentEventHandler $handler)
     {

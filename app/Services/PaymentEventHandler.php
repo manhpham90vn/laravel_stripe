@@ -21,6 +21,15 @@ use Illuminate\Support\Facades\Log;
  * chỉ tạo đơn `pending` và hủy chủ động; còn lại paid/processing/failed/refunded/
  * disputed đều do các method dưới đây thực hiện, hầu hết kích hoạt từ webhook
  * (nguồn sự thật — D5).
+ *
+ * KHÓA & SERIALIZE: gần như mọi method dưới đây mở đầu bằng
+ * `Order::whereKey(...)->lockForUpdate()` — khóa dòng ĐƠN trước để tuần tự hóa các
+ * webhook/job chạy song song trên CÙNG một đơn (vd succeeded và payment_failed về
+ * sát nhau, hoặc webhook đua với job reconcile). Nhờ đó việc đọc-status-rồi-
+ * transition là nguyên tử, không hai luồng cùng thấy `pending` rồi cùng cấp quyền.
+ * Khi cần đụng slot (reclaim/release), method gọi xuống ReservationService để khóa
+ * tiếp dòng batch — luôn theo thứ tự Order → SaleBatch → Reservation để KHÔNG
+ * deadlock (xem ghi chú "THỨ TỰ KHÓA" ở ReservationService).
  */
 class PaymentEventHandler
 {

@@ -22,6 +22,9 @@ return Application::configure(basePath: dirname(__DIR__))
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
+        // App này thuần Blade (spec §9) nên hiện KHÔNG có route api/* — đây là
+        // lưới an toàn no-op: nếu sau này thêm API thì lỗi mới render JSON thay vì
+        // trang HTML. Mọi lỗi nghiệp vụ buyer vẫn đi qua redirect-back + flash.
         $exceptions->shouldRenderJsonWhen(
             fn (Request $request) => $request->is('api/*'),
         );

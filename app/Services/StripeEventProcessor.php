@@ -68,8 +68,13 @@ class StripeEventProcessor
             ]),
             'payment_intent.succeeded' => $this->handler->markPaid($order, $ctx + [
                 'payment_method_type' => $object['payment_method_type'] ?? null,
+                // `latest_charge` là khóa của API mới; fallback `charge` cho payload
+                // cũ/khác phiên bản. charge_id cần để refund (§8.2a) và đối soát.
                 'charge_id' => $object['latest_charge'] ?? ($object['charge'] ?? null),
                 'payment_intent_id' => $object['id'] ?? null,
+                // Ưu tiên `amount_received` (số THỰC SỰ thu được, vd sau partial
+                // capture) hơn `amount` (số dự kiến) — đây chính là số đối chiếu với
+                // orders.amount ở BR-11 trước khi cấp enrollment.
                 'amount' => $object['amount_received'] ?? ($object['amount'] ?? null),
             ]),
             'payment_intent.processing' => $this->handler->markProcessing($order, $ctx + [
