@@ -3,6 +3,7 @@
 namespace App\Payments;
 
 use App\Models\Order;
+use Illuminate\Support\Facades\Log;
 use RuntimeException;
 use Stripe\StripeClient;
 use Stripe\Webhook;
@@ -31,9 +32,41 @@ class StripeGateway implements PaymentGateway
             'idempotency_key' => $this->idempotencyKey('checkout', $order),   // spec §8.1
         ]);
 
-        $order->update(['stripe_payment_intent_id' => $session->payment_intent ?? $session->id]);
+        $order->update([
+            'stripe_payment_intent_id' => $session->payment_intent ?? $session->id,
+            // Keep the cs_ id too: expireCheckout() needs it to actively close
+            // the payment window when the slot-hold TTL elapses (§8.2a).
+            'stripe_checkout_session_id' => $session->id,
+        ]);
 
         return new CheckoutSession($session->url, $session->id);
+    }
+
+    /**
+     * Actively expire the Checkout Session so it can no longer be paid — called
+     * when the slot-hold TTL elapses or the buyer cancels (§8.2a), closing the
+     * window at ~15 min instead of waiting out the 30-min expires_at floor.
+     *
+     * Stripe only expires sessions still in `open` status; a session that was
+     * already completed/expired throws InvalidRequestException, which is a no-op
+     * for us (the payment either landed — handled by reclaim-or-refund — or the
+     * window already closed). Any error is swallowed so it never blocks the
+     * release that frees the slot.
+     */
+    public function expireCheckout(Order $order): void
+    {
+        $sessionId = $order->stripe_checkout_session_id;
+        if (! $sessionId || ! str_starts_with($sessionId, 'cs_')) {
+            return; // no live session to close (async voucher / never started)
+        }
+
+        try {
+            $this->client()->checkout->sessions->expire($sessionId);
+        } catch (\Throwable $e) {
+            Log::info('Checkout session already closed — nothing to expire', [
+                'order' => $order->id, 'session' => $sessionId, 'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**
@@ -60,6 +93,13 @@ class StripeGateway implements PaymentGateway
                 'metadata' => $this->metadata($order),
             ],
             'metadata' => $this->metadata($order),
+            // Bound the session to our slot-hold rather than Stripe's 24h default
+            // so a buyer can't pay long after the seat was freed. Stripe rejects
+            // expires_at below 30 min, so clamp to that floor (payment_solutions
+            // §1.2 / spec BR-8); the residual gap is caught by reclaim-or-refund.
+            'expires_at' => now()->addMinutes(
+                max(30, (int) config('payment.ttl.session_minutes'))
+            )->timestamp,
         ];
 
         // Restrict to configured methods (default: card). Leave empty to let

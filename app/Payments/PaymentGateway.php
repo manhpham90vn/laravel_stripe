@@ -16,6 +16,13 @@ interface PaymentGateway
     public function refund(Order $order): void;
 
     /**
+     * Expire the order's Checkout Session so it can no longer be paid, called
+     * when the slot-hold TTL elapses or the buyer cancels (§8.2a). A session
+     * that is already closed (paid/expired) is a safe no-op.
+     */
+    public function expireCheckout(Order $order): void;
+
+    /**
      * Fetch the current PaymentIntent for an order as a normalized array
      * (keys: id, status, amount, currency, payment_method_type, latest_charge),
      * or null if none exists yet. Used by the reconciliation safety net

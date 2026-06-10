@@ -22,6 +22,14 @@ return [
     'ttl' => [
         'card_minutes' => env('CHECKOUT_TTL_CARD_MINUTES', 15),
         'async_days' => env('CHECKOUT_TTL_ASYNC_DAYS', 3),
+
+        /*
+        | Stripe Checkout Session lifetime (expires_at). Our slot-hold is 15 min
+        | but Stripe enforces a 30-min minimum on expires_at, so we bound the
+        | session to the floor to shrink the late-payment window (§8.2a) from the
+        | 24h default. The residual 15→30 min gap is covered by reclaim-or-refund.
+        */
+        'session_minutes' => env('CHECKOUT_TTL_SESSION_MINUTES', 30),
     ],
 
     /*

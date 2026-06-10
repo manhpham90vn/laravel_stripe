@@ -64,4 +64,30 @@ class StripeCheckoutParamsTest extends TestCase
 
         $this->assertEquals(60, $params['payment_method_options']['konbini']['expires_after_days']);
     }
+
+    /** §8.2a: the session lifetime is bounded to our configured TTL, not 24h. */
+    public function test_session_expiry_matches_configured_ttl(): void
+    {
+        config(['payment.ttl.session_minutes' => 45]);
+        $order = $this->reserve($this->onSaleBatch());
+
+        $this->freezeTime(function () use ($order) {
+            $params = $this->gateway()->checkoutParams($order);
+
+            $this->assertEquals(now()->addMinutes(45)->timestamp, $params['expires_at']);
+        });
+    }
+
+    /** Stripe rejects expires_at under 30 min, so a shorter TTL is clamped up. */
+    public function test_session_expiry_is_clamped_to_stripe_minimum(): void
+    {
+        config(['payment.ttl.session_minutes' => 15]);
+        $order = $this->reserve($this->onSaleBatch());
+
+        $this->freezeTime(function () use ($order) {
+            $params = $this->gateway()->checkoutParams($order);
+
+            $this->assertEquals(now()->addMinutes(30)->timestamp, $params['expires_at']);
+        });
+    }
 }

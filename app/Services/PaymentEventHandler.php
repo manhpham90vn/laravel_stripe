@@ -290,18 +290,28 @@ class PaymentEventHandler
 
     private function cancelOrder(Order $order, string $actor, ?int $actorId): void
     {
-        DB::transaction(function () use ($order, $actor, $actorId) {
+        $canceled = DB::transaction(function () use ($order, $actor, $actorId) {
             $order = Order::whereKey($order->id)->lockForUpdate()->with('reservation')->firstOrFail();
 
             // Only pending/processing orders may be canceled (spec §5.1).
             if (! $this->transition($order, Order::STATUS_CANCELED, [], $actor, $actorId)) {
-                return;
+                return false;
             }
 
             if ($order->reservation) {
                 $this->reservations->release($order->reservation, Reservation::STATUS_RELEASED);
             }
+
+            return true;
         });
+
+        // After the slot is freed, close the Checkout Session so the buyer can't
+        // pay a seat they no longer hold (§8.2a). Deferred past the commit so we
+        // never hold the row lock across the Stripe call; if a payment slipped in
+        // first, reclaim-or-refund in markPaid() is the backstop.
+        if ($canceled) {
+            $this->gateway->expireCheckout($order);
+        }
     }
 
     /** charge.refunded → refunded + revoke enrollment (BR-7; slot NOT auto-freed). */
