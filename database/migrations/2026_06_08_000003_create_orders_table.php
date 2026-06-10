@@ -19,6 +19,10 @@ return new class extends Migration
             $table->unsignedBigInteger('amount');
             $table->char('currency', 3)->default('JPY');
             $table->string('stripe_payment_intent_id')->nullable()->unique();
+            // Kept alongside the PI so the TTL/cancel path can actively expire the
+            // hosted session (sessions->expire) the moment the slot is freed (§8.4),
+            // not just wait out Stripe's passive expires_at.
+            $table->string('stripe_checkout_session_id')->nullable()->index();
             $table->string('stripe_charge_id')->nullable()->index();
             $table->string('payment_method_type')->nullable(); // card | konbini | ...
             $table->timestamp('reserved_until')->nullable();

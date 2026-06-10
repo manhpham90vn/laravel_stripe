@@ -211,6 +211,7 @@ với mỗi reservation active mà reserved_until < now và order chưa paid:
      ngược lại (PI chết / không có)                               → nhả
   BEGIN; lock batch; reservation→expired; slots_taken -= 1;
          nếu batch sold_out & còn trong cửa sổ → on_sale; COMMIT
+  # sau commit: chủ động checkout.sessions->expire để đóng cửa trả tiền (§8.4)
 ```
 - **TTL theo phương thức:** card ~15 phút; async (Konbini/Pay-easy) = **theo hạn
   voucher của Stripe** (vài ngày) — KHÔNG nhả sớm khi user còn hạn trả (đồng bộ với
@@ -258,8 +259,8 @@ COMMIT
 1. User mở trang đợt mở bán (GET /batches/{id}) → Blade render trạng thái (còn slot? đang bán?)
 2. User submit form "Mua" → POST /batches/{id}/checkout
 3. Controller (transaction + lock): guard cửa sổ/slot/BR-2 → tạo reservation + slots_taken++
-4. Controller tạo Stripe Checkout Session (amount lấy từ server) → order=pending;
-   success_url=/orders/{id}, cancel_url=/batches/{id}
+4. Controller tạo Stripe Checkout Session (amount lấy từ server, `expires_at` kẹp sàn
+   30' theo §8.4) → order=pending; success_url=/orders/{id}, cancel_url=/batches/{id}
 5. Controller redirect (302) trình duyệt sang trang thanh toán Stripe (Checkout hosted)
 6. User trả tiền trên Stripe → Stripe redirect trình duyệt về success_url
 7. Stripe gửi webhook payment_intent.succeeded (song song — đây mới là nguồn sự thật)
@@ -302,10 +303,17 @@ Admin bấm refund → gọi Stripe refund → webhook charge.refunded
 
 ### 8.1 Nguyên tắc
 - **Amount chốt ở server** từ `sale_batches.price`; không nhận amount từ client.
-- **Idempotency key** khi tạo PaymentIntent = khóa theo `(order_id)` để retry không tạo PI trùng.
+- **Idempotency key** khi tạo Checkout Session = khóa theo `(order_id, orders.created_at)`
+  để retry không tạo session/PI trùng. Gộp `created_at` vì auto-increment id bị tái sử
+  dụng sau `migrate:fresh`, mà Stripe giữ idempotency key ~24h — keying theo id trần dễ
+  đụng request cũ khác tham số. Mix `created_at` giữ retry cùng-đơn vẫn idempotent.
 - Gắn `metadata` lên PI: `order_id`, `sale_batch_id`, `user_id` để webhook map ngược.
 - **Webhook là nguồn sự thật.** Xác thực chữ ký (`Stripe-Signature`). Mỗi event check
-  `processed_stripe_events` trước khi xử lý (NFR-2).
+  `processed_stripe_events` trước khi xử lý (NFR-2). Marker được dọn định kỳ
+  (`PruneProcessedStripeEvents`, mặc định giữ `payment.processed_events.retention_days`
+  ngày) — Stripe ngừng retry sau vài ngày nên cắt marker cũ không yếu đi dedup.
+- **Chống ôm slot:** `/checkout` và `/orders/{id}/pay` qua rate limiter `throttle:checkout`
+  (mặc định `payment.rate_limit.checkout_per_minute`/phút theo user, fallback IP).
 
 ### 8.2 Các webhook event cần xử lý (tối thiểu)
 | Event | Hành động |
@@ -313,7 +321,7 @@ Admin bấm refund → gọi Stripe refund → webhook charge.refunded
 | `checkout.session.completed` | (nếu dùng Checkout) đánh dấu phiên hoàn tất; với async là "đã đặt voucher" |
 | `payment_intent.succeeded` | order→`paid`, consume reservation, cấp enrollment. **Nếu đơn đã `canceled`/`failed`** → reclaim-or-refund (§8.2a) |
 | `payment_intent.processing` | order→`processing` (async, đã đặt voucher) |
-| `payment_intent.payment_failed` | order→`failed`/`canceled`, nhả slot |
+| `payment_intent.payment_failed` / `payment_intent.canceled` | order→`failed`, nhả slot (cùng handler `markFailed`) |
 | `charge.refunded` | order→`refunded`, enrollment→`revoked` |
 | `charge.dispute.created` / `.closed` | đánh dấu `disputed`; xử lý theo kết quả |
 
@@ -351,6 +359,30 @@ Mọi handler webhook phải **an toàn khi gọi lại**: trước khi cấp en
 order đã `paid` chưa / enrollment đã tồn tại chưa. Dùng `unique(order_id)` ở
 `enrollments` làm chốt chặn cuối (DB từ chối insert trùng).
 
+### 8.4 Vòng đời Checkout Session & chủ động đóng khi nhả chỗ
+
+Có **hai đồng hồ độc lập**, cố ý không bằng nhau:
+- **Slot-hold TTL nội bộ** (`reserved_until`): card ~15 phút — quyết định giữ chỗ.
+- **Vòng đời Checkout Session của Stripe** (`expires_at`): mặc định 24h — quyết định
+  link còn trả được hay không.
+
+Để cửa "đã nhả chỗ nhưng Stripe vẫn nhận tiền" không kéo dài 24h, áp **hai biện pháp**:
+
+1. **`expires_at` khi tạo session** = TTL cấu hình (`payment.ttl.session_minutes`),
+   **kẹp sàn 30 phút** vì Stripe từ chối `expires_at` < 30'. Đây là lưới đỡ *thụ động*
+   (kể cả khi job nền chết, session vẫn tự hết hạn ở mốc này).
+2. **Chủ động `checkout.sessions->expire`** ngay khi slot bị nhả/đơn bị hủy
+   (`ReleaseExpiredReservations` ở mốc TTL, hoặc user bấm hủy) → đóng cửa ở ~15' thay vì
+   đợi tới 30'. Gọi *sau* khi commit nhả chỗ, không giữ row lock qua network; session
+   đã `paid`/`expired` thì `expire` là no-op an toàn.
+
+> Vì Stripe không cho `expires_at` < 30', vẫn còn khe 15'→30' khi biện pháp (2) lỡ
+> (ví dụ session vừa được tạo lại bởi luồng pay-retry chạy song song). Khe này **được
+> reclaim-or-refund (§8.2a) che**: tiền về trên đơn đã chết thì giành lại chỗ hoặc
+> auto-refund — nên `expire` chủ động là *best-effort*, không phải chốt an toàn.
+
+Cần lưu cả `stripe_checkout_session_id` (không chỉ PI id) để có handle gọi `expire`.
+
 ---
 
 ## 9. Routes & màn hình (web / Blade)
@@ -366,10 +398,11 @@ order đã `paid` chưa / enrollment đã tồn tại chưa. Dùng `unique(order
 | GET | `/courses` | Trang danh sách course published | kèm các đợt đang `on_sale` |
 | GET | `/courses/{slug}` | Trang chi tiết course | liệt kê các đợt + nút mua |
 | GET | `/batches/{id}` | Trang 1 đợt | hiển thị `status, slots_remaining, price, cửa sổ bán` |
-| POST | `/batches/{id}/checkout` | Tạo order + Stripe Checkout Session (auth) | **redirect** sang Stripe Checkout (hoặc về `/batches/{id}` kèm lỗi) |
+| POST | `/batches/{id}/checkout` | Tạo order + Stripe Checkout Session (auth) | **redirect** sang Stripe Checkout (hoặc về `/batches/{id}` kèm lỗi). Middleware `throttle:checkout` chống ôm slot |
 | GET | `/orders/{id}` | Trang trạng thái đơn (auth, chủ đơn) | success_url của Stripe trỏ về đây |
+| POST | `/orders/{id}/pay` | Tạo lại Checkout Session cho đơn `pending`/`processing` (auth, chủ đơn) | Retry sau lỗi gateway tạm thời (§12). **Không** tạo reservation mới (chỗ đã giữ); `throttle:checkout`; status khác pending/processing → 409 |
 | GET | `/my/courses` | Trang "Khóa học của tôi" (auth) | list enrollment active |
-| POST | `/orders/{id}/cancel` | Hủy đơn pending (auth) | order→canceled, nhả slot → redirect kèm flash |
+| POST | `/orders/{id}/cancel` | Hủy đơn pending (auth) | order→canceled, nhả slot, đóng Checkout Session (§8.4) → redirect kèm flash |
 
 ### Webhook (ngoại lệ — không Blade)
 | Method | Path | Mô tả |
