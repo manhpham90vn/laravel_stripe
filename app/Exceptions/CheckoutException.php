@@ -2,6 +2,7 @@
 
 namespace App\Exceptions;
 
+use App\Models\Order;
 use RuntimeException;
 
 /**
@@ -14,6 +15,8 @@ use RuntimeException;
  */
 class CheckoutException extends RuntimeException
 {
+    public ?Order $existingOrder = null;
+
     public function __construct(
         public readonly string $errorCode,
         string $message,
@@ -30,6 +33,19 @@ class CheckoutException extends RuntimeException
     public static function alreadyPurchased(): self
     {
         return new self('ALREADY_PURCHASED', 'Bạn đã mua hoặc đang có đơn cho đợt này.', 409);
+    }
+
+    /** Dùng khi đã tìm được đơn live — message phân biệt paid vs chưa hoàn tất. */
+    public static function alreadyPurchasedWithOrder(Order $order): self
+    {
+        $message = $order->status === Order::STATUS_PAID
+            ? 'Bạn đã mua đợt này rồi.'
+            : 'Bạn đang có đơn chưa hoàn tất cho đợt này. Tiếp tục thanh toán hoặc hủy đơn bên dưới.';
+
+        $e = new self('ALREADY_PURCHASED', $message, 409);
+        $e->existingOrder = $order;
+
+        return $e;
     }
 
     public static function notOnSale(): self

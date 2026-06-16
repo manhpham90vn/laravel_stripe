@@ -3,12 +3,11 @@
 namespace App\Http\Controllers\Auth;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Auth\RegisterRequest;
 use App\Models\User;
 use Illuminate\Auth\Events\Registered;
-use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
-use Illuminate\Validation\Rules\Password;
 
 /** Đăng ký tài khoản mới (auth cơ bản kiểu Breeze). Mặc định role = 'user'. */
 class RegisteredUserController extends Controller
@@ -20,13 +19,9 @@ class RegisteredUserController extends Controller
     }
 
     /** POST /register — tạo user (role 'user'), hash mật khẩu, đăng nhập luôn. */
-    public function store(Request $request)
+    public function store(RegisterRequest $request)
     {
-        $data = $request->validate([
-            'name' => ['required', 'string', 'max:255'],
-            'email' => ['required', 'string', 'email', 'max:255', 'unique:users,email'],
-            'password' => ['required', 'confirmed', Password::defaults()],
-        ]);
+        $data = $request->validated();
 
         $user = User::create([
             'name' => $data['name'],

@@ -42,6 +42,21 @@ class SaleBatch extends Model
         return $this->hasMany(Reservation::class);
     }
 
+    public function activeReservationsCount(): int
+    {
+        return $this->reservations()->where('status', Reservation::STATUS_ACTIVE)->count();
+    }
+
+    public function paidOrdersCount(): int
+    {
+        return $this->orders()->where('status', Order::STATUS_PAID)->count();
+    }
+
+    public function revenue(): int
+    {
+        return (int) $this->orders()->where('status', Order::STATUS_PAID)->sum('amount');
+    }
+
     /** Số chỗ còn lại (không âm). */
     public function remainingSlots(): int
     {

@@ -19,4 +19,10 @@ class OrderPolicy
     {
         return $order->user_id === $user->id;
     }
+
+    /** Chỉ admin được refund, và đơn phải ở trạng thái paid. */
+    public function refund(User $user, Order $order): bool
+    {
+        return $user->isAdmin() && $order->status === Order::STATUS_PAID;
+    }
 }

@@ -10,8 +10,9 @@ class MyCourseController extends Controller
 {
     public function index(Request $request)
     {
-        $enrollments = Enrollment::with('course')
-            ->where('user_id', $request->user()->id)
+        $enrollments = $request->user()
+            ->enrollments()
+            ->with('course')
             ->where('status', Enrollment::STATUS_ACTIVE)
             ->latest('granted_at')
             ->get();

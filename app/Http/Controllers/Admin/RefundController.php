@@ -11,9 +11,7 @@ class RefundController extends Controller
 {
     public function store(Order $order, PaymentGateway $gateway)
     {
-        if ($order->status !== Order::STATUS_PAID) {
-            return back()->with('error', 'Chỉ hoàn tiền được đơn đã thanh toán.');
-        }
+        $this->authorize('refund', $order);
 
         // Kích hoạt refund; thay đổi trạng thái (refunded + thu hồi enrollment)
         // sẽ về qua webhook charge.refunded — KHÔNG đổi trạng thái tại đây (D5).

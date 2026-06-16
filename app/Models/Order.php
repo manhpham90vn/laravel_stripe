@@ -86,4 +86,20 @@ class Order extends Model
     {
         return Attribute::get(fn () => $this->reserved_until?->format('d/m H:i'));
     }
+
+    /** Đơn có thể retry thanh toán không (pending hoặc processing). */
+    public function isRetriable(): bool
+    {
+        return in_array($this->status, [self::STATUS_PENDING, self::STATUS_PROCESSING], true);
+    }
+
+    /** Đơn còn "sống" của user cho một đợt bán (BR-2), nếu có. */
+    public static function liveFor(SaleBatch $batch, User $user): ?self
+    {
+        return static::where('sale_batch_id', $batch->id)
+            ->where('user_id', $user->id)
+            ->whereIn('status', self::LIVE_STATUSES)
+            ->latest('id')
+            ->first();
+    }
 }

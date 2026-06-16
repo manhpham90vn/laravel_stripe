@@ -19,7 +19,7 @@ use Illuminate\Support\Facades\Route;
 Route::get('/', fn () => redirect()->route('courses.index'));
 Route::get('/courses', [CourseController::class, 'index'])->name('courses.index');
 Route::get('/courses/{slug}', [CourseController::class, 'show'])->name('courses.show');
-Route::get('/batches/{id}', [BatchController::class, 'show'])->name('batches.show');
+Route::get('/batches/{batch}', [BatchController::class, 'show'])->name('batches.show');
 
 /*
 |----------------------------------------------------------------------------
@@ -40,14 +40,14 @@ Route::post('/logout', [AuthenticatedSessionController::class, 'destroy'])->midd
 |----------------------------------------------------------------------------
 */
 Route::middleware('auth')->group(function () {
-    Route::post('/batches/{id}/checkout', [CheckoutController::class, 'store'])
+    Route::post('/batches/{batch}/checkout', [CheckoutController::class, 'store'])
         ->middleware('throttle:checkout')   // §1.2: chặn ôm chỗ bằng cách checkout liên tục
         ->name('checkout.store');
-    Route::get('/orders/{id}', [OrderController::class, 'show'])->name('orders.show');
-    Route::post('/orders/{id}/pay', [CheckoutController::class, 'pay'])
+    Route::get('/orders/{order}', [OrderController::class, 'show'])->name('orders.show');
+    Route::post('/orders/{order}/pay', [CheckoutController::class, 'pay'])
         ->middleware('throttle:checkout')
         ->name('orders.pay');
-    Route::post('/orders/{id}/cancel', [OrderController::class, 'cancel'])->name('orders.cancel');
+    Route::post('/orders/{order}/cancel', [OrderController::class, 'cancel'])->name('orders.cancel');
     Route::get('/my/courses', [MyCourseController::class, 'index'])->name('my.courses');
 });
 

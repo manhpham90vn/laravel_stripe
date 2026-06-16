@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Auth;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Auth\LoginRequest;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\ValidationException;
@@ -17,14 +18,9 @@ class AuthenticatedSessionController extends Controller
     }
 
     /** POST /login — xác thực; sai thì ném ValidationException, đúng thì regenerate session. */
-    public function store(Request $request)
+    public function store(LoginRequest $request)
     {
-        $credentials = $request->validate([
-            'email' => ['required', 'string', 'email'],
-            'password' => ['required', 'string'],
-        ]);
-
-        if (! Auth::attempt($credentials, $request->boolean('remember'))) {
+        if (! Auth::attempt($request->validated(), $request->boolean('remember'))) {
             throw ValidationException::withMessages([
                 'email' => 'Email hoặc mật khẩu không đúng.',
             ]);
@@ -37,6 +33,7 @@ class AuthenticatedSessionController extends Controller
         return redirect()->intended($user->isAdmin() ? '/admin/courses' : '/courses');
     }
 
+    /** POST /logout — đăng xuất, hủy session, regenerate CSRF token. */
     public function destroy(Request $request)
     {
         Auth::guard('web')->logout();
