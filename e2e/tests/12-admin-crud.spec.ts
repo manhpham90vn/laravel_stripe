@@ -21,8 +21,9 @@ test('admin creates a course with a batch and views stats', async ({ page }) => 
   await expect(page).toHaveURL(/\/admin\/courses$/, { timeout: 15_000 });
   await expect(page.getByText(`Đã tạo khóa học "${courseTitle}"`)).toBeVisible();
 
-  // The new course must appear in the table.
-  await expect(page.getByText(courseTitle)).toBeVisible();
+  // The new course must appear in the table. Use exact match so this does not
+  // also resolve the flash message above (which embeds the title in a sentence).
+  await expect(page.getByText(courseTitle, { exact: true })).toBeVisible();
 
   // ── Navigate to batch management ─────────────────────────────────────────────
   // The admin courses index renders a <tr> per course; find the row containing

@@ -9,6 +9,10 @@ services:
       context: .
       dockerfile: docker/app.Dockerfile
     env_file: .env.e2e
+    networks:
+      default:
+        aliases:
+          - webapp
     volumes:
       - shared:/shared
     ports:
@@ -43,7 +47,7 @@ services:
     working_dir: /e2e
     env_file: .env.e2e
     environment:
-      BASE_URL: http://app:8000
+      BASE_URL: http://webapp:8000
     volumes:
       - ./e2e:/e2e
     depends_on:

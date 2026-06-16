@@ -44,10 +44,13 @@
                 </x-button>
             </form>
             <span class="text-sm text-slate-400">Thanh toán an toàn qua Stripe</span>
-        @elseif ($batch['status'] === 'sold_out' || $remaining === 0)
-            <x-button variant="secondary" size="lg" disabled class="flex-1 sm:flex-none">Đã hết slot</x-button>
         @elseif ($batch['status'] === 'scheduled')
             <x-button variant="secondary" size="lg" disabled class="flex-1 sm:flex-none">Sắp mở bán</x-button>
+        @elseif ($batch['status'] === 'closed')
+            {{-- A closed batch stays "Đã đóng" even when full, so the CTA matches the status badge. --}}
+            <x-button variant="secondary" size="lg" disabled class="flex-1 sm:flex-none">Đã đóng</x-button>
+        @elseif ($batch['status'] === 'sold_out' || $remaining === 0)
+            <x-button variant="secondary" size="lg" disabled class="flex-1 sm:flex-none">Đã hết slot</x-button>
         @else
             <x-button variant="secondary" size="lg" disabled class="flex-1 sm:flex-none">Đã đóng</x-button>
         @endif

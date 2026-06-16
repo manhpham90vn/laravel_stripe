@@ -164,7 +164,19 @@ class StripeGateway implements PaymentGateway
      */
     private function idempotencyKey(string $action, Order $order): string
     {
-        return $action.'_order_'.$order->id.'_'.optional($order->created_at)->getTimestamp();
+        $key = $action.'_order_'.$order->id.'_'.optional($order->created_at)->getTimestamp();
+
+        // Mỗi lần MỞ phiên checkout (kể cả retry qua orders.show) là một request
+        // KHÁC tham số: expires_at được tính theo now() nên đổi giữa các lần gọi.
+        // Cùng key + khác tham số → Stripe ném "Keys for idempotent requests can
+        // only be used with the same parameters". Trộn thêm id phiên đang bị thay
+        // thế (null ở phiên đầu) để mỗi THẾ HỆ phiên có key riêng, trong khi
+        // auto-retry mạng của SDK trong cùng một lần gọi vẫn giữ nguyên key.
+        if ($action === 'checkout') {
+            $key .= '_'.($order->stripe_checkout_session_id ?? 'new');
+        }
+
+        return $key;
     }
 
     /**
