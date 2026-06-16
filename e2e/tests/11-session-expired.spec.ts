@@ -40,8 +40,9 @@ test('checkout.session.expired webhook cancels the pending order', async ({ page
   // Expire the Stripe Checkout Session via the REST API.
   // The `checkout.session.expired` event is then forwarded by the Stripe CLI
   // to the local webhook endpoint, where the queue worker processes it.
-  const stripeKey = process.env.STRIPE_SECRET_KEY;
-  if (!stripeKey) throw new Error('STRIPE_SECRET_KEY must be set for this test');
+  // The Stripe CLI / app config use STRIPE_SECRET; accept either name.
+  const stripeKey = process.env.STRIPE_SECRET_KEY || process.env.STRIPE_SECRET;
+  if (!stripeKey) throw new Error('STRIPE_SECRET_KEY (or STRIPE_SECRET) must be set for this test');
 
   const expireResponse = await page.request.post(
     `https://api.stripe.com/v1/checkout/sessions/${sessionId}/expire`,

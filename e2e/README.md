@@ -72,6 +72,15 @@ forwarding webhooks to it.
 | `02-payment-failed` | declined card (`4000…0002`) shows an inline error, checkout not completed | Hosted Checkout declines don't emit a FAILED webhook; see the comment in the spec to force one with `stripe trigger` |
 | `03-konbini-async` | Konbini voucher → order `processing` | **Skipped** unless `E2E_KONBINI=1` and Konbini is enabled in the Dashboard; voucher → `paid` completion is a manual/test-helper step |
 | `04-refund` | buy → admin refunds → `charge.refunded` → order `refunded`, enrollment revoked | Refund hits the real Stripe API |
+| `05-cancel-order` | abandon checkout → buyer cancels the pending order → `canceled`, slot freed | Synchronous (no webhook) |
+| `06-already-purchased` | re-buying a paid batch redirects to the existing paid order (BR-2), not a new one | "Vào học ngay" CTA |
+| `07-sold-out` | sold-out batch shows a disabled "Đã hết slot" button and hides the buy form | UI guard, no checkout |
+| `08-not-on-sale` | scheduled/closed batches render the correct disabled CTAs | UI guard, public page |
+| `09-auth-guards` | guest buy → `/login`; a buyer cannot view another buyer's order (403) | IDOR (issue 4.5) |
+| `10-retry-payment` | abandon → "Tiếp tục thanh toán" opens a new session on the SAME order → `paid` | Resume flow (§12) |
+| `11-session-expired` | `checkout.session.expired` webhook cancels the pending order, releases the slot | **Skipped** unless `E2E_SESSION_EXPIRE=1` (+ `STRIPE_SECRET_KEY`); expires the session via the Stripe REST API. Backed by the `onCheckoutExpired` handler (issue 2.5) |
+| `12-admin-crud` | admin creates a course + batch and views batch stats | No payment flow |
+| `13-trust-webhook-not-client` | visiting the success_url without paying keeps the order `pending` and grants nothing | Issue 2.4 — webhook is the only source of truth |
 
 Each buyer test **registers a fresh account** (`registerBuyer`) because the app
 allows only one live order per batch per buyer (BR-2) and tests share one seeded
@@ -98,4 +107,13 @@ e2e/
     02-payment-failed.spec.ts
     03-konbini-async.spec.ts
     04-refund.spec.ts
+    05-cancel-order.spec.ts
+    06-already-purchased.spec.ts
+    07-sold-out.spec.ts
+    08-not-on-sale.spec.ts
+    09-auth-guards.spec.ts
+    10-retry-payment.spec.ts
+    11-session-expired.spec.ts
+    12-admin-crud.spec.ts
+    13-trust-webhook-not-client.spec.ts
 ```

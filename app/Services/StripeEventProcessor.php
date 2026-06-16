@@ -80,6 +80,9 @@ class StripeEventProcessor
             'payment_intent.processing' => $this->handler->markProcessing($order, $ctx + [
                 'payment_method_type' => $object['payment_method_type'] ?? 'konbini',
             ]),
+            // Phiên thanh toán hết hạn → hủy đơn + nhả chỗ ngay (issue 2.5). Tín
+            // hiệu đáng tin từ Stripe, không phải đợi job TTL quét.
+            'checkout.session.expired' => $this->handler->onCheckoutExpired($order, $ctx),
             'payment_intent.payment_failed',
             'payment_intent.canceled' => $this->handler->markFailed($order, $ctx + [
                 'reason' => $object['last_payment_error']['message'] ?? null,

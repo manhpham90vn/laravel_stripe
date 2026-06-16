@@ -36,6 +36,12 @@ class StripeGateway implements PaymentGateway
     {
         $order->loadMissing('saleBatch.course');
 
+        // §2.16: một đơn chỉ được có TỐI ĐA 1 phiên sống. Khi retry (đơn đã có
+        // cs_ cũ còn open ở tab khác), đóng phiên cũ TRƯỚC khi mở phiên mới để
+        // người mua không trả tiền vào phiên cũ (giá/đơn có thể đã đổi) hay trả
+        // trên cả hai. No-op an toàn khi chưa có phiên (đơn mới) hoặc phiên đã đóng.
+        $this->expireCheckout($order);
+
         $session = $this->client()->checkout->sessions->create($this->checkoutParams($order), [
             'idempotency_key' => $this->idempotencyKey('checkout', $order),   // spec §8.1
         ]);

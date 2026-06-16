@@ -17,9 +17,16 @@ use Illuminate\Support\Facades\Log;
  */
 class CheckoutService
 {
+    /**
+     * Ngưỡng charge tối thiểu của Stripe theo currency (issue 2.13). JPY là
+     * zero-decimal nên ~¥50; dự án chỉ dùng JPY nên default cũng 50.
+     */
+    private const MIN_CHARGE = ['JPY' => 50];
+
     public function __construct(
         private ReservationService $reservations,
         private PaymentGateway $gateway,
+        private PaymentEventHandler $payments,
     ) {}
 
     /**
@@ -32,6 +39,12 @@ class CheckoutService
      */
     public function initiate(SaleBatch $batch, User $user): string
     {
+        // 2.13: giá > 0 nhưng dưới ngưỡng Stripe → không charge được. Chặn TRƯỚC
+        // khi reserve để không tạo đơn/giữ chỗ treo cho một đợt không bán được.
+        if ($batch->price > 0 && $batch->price < $this->minCharge($batch->currency)) {
+            throw CheckoutException::belowMinimumCharge();
+        }
+
         try {
             $order = $this->reservations->reserve($batch, $user);
         } catch (CheckoutException $e) {
@@ -44,6 +57,15 @@ class CheckoutService
                 }
             }
             throw $e;
+        }
+
+        // 2.13: đơn miễn phí (amount == 0) KHÔNG đi qua Stripe — cấp quyền ngay
+        // qua cùng "một cửa lên paid" (markPaid) để vẫn consume chỗ + grant
+        // enrollment + audit, rồi đưa thẳng người mua tới trang đơn.
+        if ((int) $order->amount === 0) {
+            $this->payments->markPaid($order, ['amount' => 0, 'payment_method_type' => 'free']);
+
+            return route('orders.show', $order);
         }
 
         return $this->openSession($order);
@@ -60,6 +82,12 @@ class CheckoutService
         $order->loadMissing('saleBatch');
 
         return $this->openSession($order);
+    }
+
+    /** Ngưỡng charge tối thiểu cho currency (issue 2.13); JPY/zero-decimal default 50. */
+    private function minCharge(string $currency): int
+    {
+        return self::MIN_CHARGE[strtoupper($currency)] ?? 50;
     }
 
     private function openSession(Order $order): string

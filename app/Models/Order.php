@@ -38,6 +38,7 @@ class Order extends Model
         'konbini' => 'Konbini',
         'pay_easy' => 'Pay-easy',
         'bank_transfer' => 'Chuyển khoản',
+        'free' => 'Miễn phí',
     ];
 
     public function saleBatch(): BelongsTo

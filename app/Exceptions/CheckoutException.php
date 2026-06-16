@@ -52,4 +52,14 @@ class CheckoutException extends RuntimeException
     {
         return new self('BATCH_NOT_ON_SALE', 'Đợt này chưa mở bán hoặc đã đóng.', 422);
     }
+
+    /**
+     * Giá > 0 nhưng DƯỚI ngưỡng charge tối thiểu của Stripe theo currency
+     * (JPY ~¥50) — không thể tạo charge (issue 2.13). Đây là lỗi cấu hình đợt
+     * bán (đặt giá quá nhỏ), không phải lỗi người mua.
+     */
+    public static function belowMinimumCharge(): self
+    {
+        return new self('BELOW_MINIMUM_CHARGE', 'Giá đợt bán dưới ngưỡng thanh toán tối thiểu.', 422);
+    }
 }

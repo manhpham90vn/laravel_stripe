@@ -27,10 +27,11 @@ class AdminTest extends TestCase
         // Gateway must NOT be hit for a non-paid order.
         $this->mock(PaymentGateway::class)->shouldNotReceive('refund');
 
+        // OrderPolicy::refund() gates on status === paid, so refunding a pending
+        // order is forbidden at the authorization layer (403), not a soft redirect.
         $this->actingAs($this->admin())
             ->post(route('admin.orders.refund', $order->id))
-            ->assertRedirect()
-            ->assertSessionHas('error');
+            ->assertForbidden();
     }
 
     public function test_refund_calls_the_gateway_for_a_paid_order(): void

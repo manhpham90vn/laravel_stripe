@@ -323,6 +323,31 @@ class PaymentEventHandler
         });
     }
 
+    /**
+     * checkout.session.expired → phiên thanh toán đã hết hạn ở Stripe (issue 2.5).
+     * Đây là tín hiệu ĐÁNG TIN của Stripe rằng người mua sẽ không trả tiền qua
+     * phiên đó nữa → hủy đơn `pending`/`processing` và nhả chỗ NGAY, thay vì đợi
+     * job TTL quét. Webhook-driven nên đi qua applyEvent() để ghi dấu dedup
+     * (BR-5); transition cùng-status là no-op an toàn (vd job TTL đã hủy trước,
+     * hoặc phiên này do chính expireCheckout() của ta đóng).
+     *
+     * KHÔNG gọi expireCheckout() ở đây — phiên đã expired sẵn rồi.
+     */
+    public function onCheckoutExpired(Order $order, array $meta = []): void
+    {
+        $this->applyEvent($meta['event_id'] ?? null, $meta['event_type'] ?? null, function () use ($order, $meta) {
+            $order = Order::whereKey($order->id)->lockForUpdate()->with('reservation')->firstOrFail();
+
+            if (! $this->transition($order, Order::STATUS_CANCELED, [], 'webhook', null, $meta)) {
+                return;
+            }
+
+            if ($order->reservation) {
+                $this->reservations->release($order->reservation, Reservation::STATUS_RELEASED);
+            }
+        });
+    }
+
     /** Người mua tự bấm hủy đơn đang chờ (spec §9). Actor = 'user'. */
     public function cancel(Order $order, int $actorId): void
     {
